@@ -94,6 +94,8 @@ final class UsageStore: ObservableObject {
         var snapshots: [String: ProviderSnapshot]
         var lastAttempt: [String: Date]
         var cooldownUntil: [String: Date]
+        // Optional so a cache written before this field existed still decodes.
+        var rateLimitStreak: [String: Int]?
     }
 
     private static let cacheDefaultsKey = "usageCacheV1"
@@ -105,6 +107,10 @@ final class UsageStore: ObservableObject {
     // A 429 is a hard "back off" signal from the server: the provider is
     // skipped until this deadline even under a forced refresh.
     private var cooldownUntil: [UsageProvider: Date] = [:]
+
+    // Consecutive 429s per provider, so each cooldown can be longer than the
+    // last while the server keeps refusing. Cleared by the next success.
+    private var rateLimitStreak: [UsageProvider: Int] = [:]
 
     init() {
         let defaults = UserDefaults.standard
@@ -174,13 +180,21 @@ final class UsageStore: ObservableObject {
                   date.timeIntervalSince(now) <= maxBackoff else { continue }
             cooldownUntil[provider] = date
         }
+        // The streak only means something mid-episode, so it's restored for
+        // providers whose cooldown is still running; anyone else starts over.
+        for (raw, count) in cache.rateLimitStreak ?? [:] {
+            guard let provider = UsageProvider(rawValue: raw),
+                  cooldownUntil[provider] != nil, count > 0 else { continue }
+            rateLimitStreak[provider] = count
+        }
     }
 
     private func saveCache() {
-        var cache = PersistedCache(snapshots: [:], lastAttempt: [:], cooldownUntil: [:])
+        var cache = PersistedCache(snapshots: [:], lastAttempt: [:], cooldownUntil: [:], rateLimitStreak: [:])
         for (provider, snapshot) in snapshots { cache.snapshots[provider.rawValue] = snapshot }
         for (provider, date) in lastAttempt { cache.lastAttempt[provider.rawValue] = date }
         for (provider, date) in cooldownUntil { cache.cooldownUntil[provider.rawValue] = date }
+        for (provider, count) in rateLimitStreak { cache.rateLimitStreak?[provider.rawValue] = count }
         guard let data = try? JSONEncoder().encode(cache) else { return }
         UserDefaults.standard.set(data, forKey: Self.cacheDefaultsKey)
     }
@@ -272,9 +286,12 @@ final class UsageStore: ObservableObject {
     }
 
     /// The floor between fetch attempts for a provider. Codex is a local
-    /// subprocess with nothing to throttle; Claude's `/api/oauth/usage` is
-    /// rate limited (Claude Code itself caches it for 5 minutes), so we match
-    /// that cadence to avoid HTTP 429s.
+    /// subprocess with nothing to throttle. Claude's `/api/oauth/usage` is
+    /// rate limited per account, with the budget shared by every client
+    /// signed in to it (Claude Code itself refreshes its on-disk copy at most
+    /// every 5 minutes), so we match that cadence. That alone can't prevent a
+    /// 429 — another client may have spent the budget — which is why the
+    /// store prefers `cachedSnapshot()` and backs off harder on each 429.
     func minimumRefreshInterval(for provider: UsageProvider) -> TimeInterval {
         switch provider {
         case .codex: return 0
@@ -322,6 +339,7 @@ final class UsageStore: ObservableObject {
 
     private func runRefreshCycle(force: Bool) async {
         await refreshInstalledProviders()
+        await adoptLocalSnapshots()
 
         let now = Date()
         var providersToFetch: [UsageProvider] = []
@@ -332,6 +350,11 @@ final class UsageStore: ObservableObject {
                 ? forcedMinimumRefreshInterval(for: provider)
                 : minimumRefreshInterval(for: provider)
             if let last = lastAttempt[provider], now.timeIntervalSince(last) < floor {
+                continue
+            }
+            // Data younger than the floor — usually just adopted from the
+            // provider's local cache — makes a request pointless.
+            if let fetchedAt = snapshots[provider]?.fetchedAt, now.timeIntervalSince(fetchedAt) < floor {
                 continue
             }
             providersToFetch.append(provider)
@@ -364,6 +387,7 @@ final class UsageStore: ObservableObject {
                     case .success(let snapshot):
                         snapshots[provider] = snapshot
                         cooldownUntil[provider] = nil
+                        rateLimitStreak[provider] = nil
                     case .clientError(let error):
                         errors[provider] = error
                         if let backoff = backoffInterval(for: error, provider: provider) {
@@ -386,12 +410,14 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    /// How long to skip a provider after a rate-limit response. The server's
-    /// `Retry-After` wins when it sends one; otherwise the provider's own
-    /// minimum interval is the right guess, since that's the cadence the API
-    /// is documented to tolerate. The old flat 60s was shorter than that
-    /// interval, so a back-off could expire while the provider was still
-    /// being rate limited.
+    /// How long to skip a provider after a rate-limit response. A positive
+    /// `Retry-After` is the server's own estimate, so it wins. Claude's usage
+    /// endpoint, though, answers 429 with `Retry-After: 0` while the limit has
+    /// been seen to persist for half an hour or more, so zero (or no header)
+    /// is treated as "unknown": the wait starts at the provider's minimum
+    /// interval and doubles on every consecutive 429 — 300s, 600s, 1200s,
+    /// 2400s, then the cap — instead of the old flat 60s, which just spent
+    /// another request into the same closed window.
     private func backoffInterval(for error: UsageClientError, provider: UsageProvider) -> TimeInterval? {
         let retryAfter: TimeInterval?
         switch error {
@@ -399,8 +425,41 @@ final class UsageStore: ObservableObject {
         case .httpStatus(429): retryAfter = nil
         default: return nil
         }
-        let suggested = retryAfter ?? minimumRefreshInterval(for: provider)
-        return min(max(suggested, 60), maxBackoff)
+        let streak = (rateLimitStreak[provider] ?? 0) + 1
+        rateLimitStreak[provider] = streak
+        if let retryAfter, retryAfter > 0 {
+            return min(max(retryAfter, 60), maxBackoff)
+        }
+        let base = max(minimumRefreshInterval(for: provider), 60)
+        let doublings = min(streak - 1, 8)
+        return min(base * pow(2, Double(doublings)), maxBackoff)
+    }
+
+    /// Free data first. A provider may keep its own copy of the usage on disk
+    /// (Claude Code caches the endpoint's last response in its config file),
+    /// and reading that costs nothing against the rate limit — so it's never
+    /// throttled or cooled down, and is adopted whenever it's newer than what
+    /// is on screen. A fresh number also supersedes a stale error message;
+    /// any 429 cooldown stays in force.
+    private func adoptLocalSnapshots() async {
+        let providers = enabledProviders
+        guard !providers.isEmpty else { return }
+        let local = await Task.detached(priority: .utility) {
+            var found: [UsageProvider: ProviderSnapshot] = [:]
+            for provider in providers {
+                if let snapshot = usageProviderClient(for: provider).cachedSnapshot() {
+                    found[provider] = snapshot
+                }
+            }
+            return found
+        }.value
+        for (provider, snapshot) in local {
+            let current = snapshots[provider]
+            guard snapshot.fetchedAt > (current?.fetchedAt ?? .distantPast) else { continue }
+            snapshots[provider] = snapshot.fillingPlan(from: current)
+            errors[provider] = nil
+            otherErrors[provider] = nil
+        }
     }
 
     private func refreshInstalledProviders() async {

@@ -53,6 +53,25 @@ struct ProviderSnapshot: Sendable, Codable {
     let fetchedAt: Date
 }
 
+extension ProviderSnapshot {
+    /// This snapshot with `plan` borrowed from `other` when it has none. A
+    /// provider's on-disk cache carries the usage but not the account's plan
+    /// (only the credentials know that), so an adopted cache entry would
+    /// otherwise blank the plan line until the next network fetch.
+    func fillingPlan(from other: ProviderSnapshot?) -> ProviderSnapshot {
+        guard plan == nil, let inherited = other?.plan else { return self }
+        return ProviderSnapshot(
+            provider: provider,
+            primary: primary,
+            secondary: secondary,
+            extras: extras,
+            plan: inherited,
+            credits: credits,
+            fetchedAt: fetchedAt
+        )
+    }
+}
+
 enum UsageClientError: LocalizedError, Sendable {
     case codexNotFound
     case launchFailed(String)
@@ -108,5 +127,14 @@ protocol UsageProviderClient {
     static var provider: UsageProvider { get }
     /// Whether the provider's tooling is present on this machine.
     static func isInstalled() -> Bool
+    /// A snapshot the provider's own tooling already fetched and left on disk,
+    /// if it keeps one. Reading it costs nothing against the provider's rate
+    /// limit, so the store checks it every cycle and only calls `fetch()` when
+    /// it's missing or stale. Runs off the main actor and may do file IO.
+    static func cachedSnapshot() -> ProviderSnapshot?
     static func fetch() throws -> ProviderSnapshot
+}
+
+extension UsageProviderClient {
+    static func cachedSnapshot() -> ProviderSnapshot? { nil }
 }

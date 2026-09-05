@@ -17,6 +17,14 @@ enum ClaudeUsageClient: UsageProviderClient {
         ClaudeCredentialStore.isAvailable()
     }
 
+    /// Claude Code's own on-disk copy of the usage response (see
+    /// `ClaudeCodeUsageCache`). No credentials are touched here: the plan
+    /// isn't in the cache, and the store fills it in from the last snapshot.
+    static func cachedSnapshot() -> ProviderSnapshot? {
+        guard let entry = ClaudeCodeUsageCache.load() else { return nil }
+        return try? parse(entry.utilization, plan: nil, fetchedAt: entry.fetchedAt)
+    }
+
     static func fetch() throws -> ProviderSnapshot {
         let credentials = try ClaudeCredentialStore.load()
         if credentials.isExpired {
@@ -92,7 +100,12 @@ enum ClaudeUsageClient: UsageProviderClient {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw UsageClientError.invalidResponse
         }
+        return try parse(json, plan: plan, fetchedAt: Date())
+    }
 
+    /// Shared by the network response and Claude Code's cached copy of it,
+    /// which have the same shape.
+    private static func parse(_ json: [String: Any], plan: String?, fetchedAt: Date) throws -> ProviderSnapshot {
         let primary = window(json["five_hour"], durationMinutes: 300)
         let secondary = window(json["seven_day"], durationMinutes: 10080)
 
@@ -133,7 +146,7 @@ enum ClaudeUsageClient: UsageProviderClient {
             extras: extras,
             plan: plan,
             credits: creditInfo(from: json["extra_usage"] as? [String: Any]),
-            fetchedAt: Date()
+            fetchedAt: fetchedAt
         )
     }
 
