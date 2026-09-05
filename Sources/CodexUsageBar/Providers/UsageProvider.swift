@@ -2,7 +2,7 @@ import Foundation
 
 enum UsageProvider: String, CaseIterable, Identifiable, Sendable {
     case codex
-    // claude comes in Phase 2
+    case claude
 
     var id: String { rawValue }
 }
@@ -44,6 +44,11 @@ enum UsageClientError: LocalizedError, Sendable {
     case timedOut
     case invalidResponse
     case server(String)
+    case claudeCredentialsNotFound
+    case claudeTokenExpired
+    case claudeNotSubscribed
+    case httpStatus(Int)
+    case network(String)
 
     func message(language: AppLanguage) -> String {
         switch self {
@@ -57,6 +62,21 @@ enum UsageClientError: LocalizedError, Sendable {
             return L10n.string("error_invalid_response", language: language)
         case .server(let message):
             return L10n.format("error_server", language: language, message)
+        case .claudeCredentialsNotFound:
+            return L10n.string("error_claude_credentials_not_found", language: language)
+        case .claudeTokenExpired:
+            return L10n.string("error_claude_token_expired", language: language)
+        case .claudeNotSubscribed:
+            return L10n.string("error_claude_not_subscribed", language: language)
+        case .httpStatus(let code):
+            // A 401 almost always means the token expired between our expiry
+            // check and the request landing, so point at the same remedy.
+            if code == 401 {
+                return L10n.string("error_claude_token_expired", language: language)
+            }
+            return L10n.format("error_http_status", language: language, code)
+        case .network(let message):
+            return L10n.format("error_network", language: language, message)
         }
     }
 

@@ -26,16 +26,34 @@ enum CodexUsageBarMain {
     }
 
     private static func runSelfTest() -> Never {
-        do {
-            let snapshot = try CodexUsageClient.fetch()
-            let primary = snapshot.primary?.remainingPercent.description ?? "n/a"
-            let secondary = snapshot.secondary?.remainingPercent.description ?? "n/a"
-            let resets = snapshot.credits?.resetCount ?? 0
-            print("OK 5h=\(primary)% weekly=\(secondary)% resets=\(resets)")
-            exit(EXIT_SUCCESS)
-        } catch {
-            fputs("ERROR \(error.localizedDescription)\n", stderr)
-            exit(EXIT_FAILURE)
+        var anyFailed = false
+
+        for provider in UsageProvider.allCases {
+            let client = usageProviderClient(for: provider)
+            guard client.isInstalled() else {
+                print("SKIP \(provider.rawValue) (not installed)")
+                continue
+            }
+
+            do {
+                let snapshot = try client.fetch()
+                let primary = snapshot.primary?.remainingPercent.description ?? "n/a"
+                let secondary = snapshot.secondary?.remainingPercent.description ?? "n/a"
+                switch provider {
+                case .codex:
+                    let resets = snapshot.credits?.resetCount ?? 0
+                    print("OK \(provider.rawValue) 5h=\(primary)% weekly=\(secondary)% resets=\(resets)")
+                case .claude:
+                    let plan = snapshot.plan ?? "n/a"
+                    print("OK \(provider.rawValue) 5h=\(primary)% weekly=\(secondary)% plan=\(plan)")
+                }
+            } catch {
+                anyFailed = true
+                let message = (error as? UsageClientError)?.message(language: .system) ?? error.localizedDescription
+                fputs("ERROR \(provider.rawValue) \(message)\n", stderr)
+            }
         }
+
+        exit(anyFailed ? EXIT_FAILURE : EXIT_SUCCESS)
     }
 }

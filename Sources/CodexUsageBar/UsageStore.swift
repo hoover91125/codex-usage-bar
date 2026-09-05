@@ -4,9 +4,10 @@ import ServiceManagement
 
 private let enabledProviders: [UsageProvider] = [.codex]
 
-private func usageProviderClient(for provider: UsageProvider) -> any UsageProviderClient.Type {
+func usageProviderClient(for provider: UsageProvider) -> any UsageProviderClient.Type {
     switch provider {
     case .codex: return CodexUsageClient.self
+    case .claude: return ClaudeUsageClient.self
     }
 }
 
