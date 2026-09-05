@@ -1,6 +1,5 @@
 import SwiftUI
 
-let usageDashboardURL = URL(string: "https://chatgpt.com/codex/settings/usage")!
 let usageMenuContentWidth: CGFloat = 330
 
 struct CodexUsageBarApp: App {

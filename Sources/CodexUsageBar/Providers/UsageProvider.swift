@@ -5,6 +5,21 @@ enum UsageProvider: String, CaseIterable, Identifiable, Sendable {
     case claude
 
     var id: String { rawValue }
+
+    // Brand names — never localized.
+    var displayName: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        }
+    }
+
+    var dashboardURL: URL {
+        switch self {
+        case .codex: return URL(string: "https://chatgpt.com/codex/settings/usage")!
+        case .claude: return URL(string: "https://claude.ai/settings/usage")!
+        }
+    }
 }
 
 struct RateWindow: Sendable {

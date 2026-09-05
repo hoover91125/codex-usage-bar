@@ -25,6 +25,26 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section(store.tr("section_services")) {
+                ForEach(UsageProvider.allCases) { provider in
+                    let installed = store.installedProviders.contains(provider)
+                    Toggle(provider.displayName, isOn: providerEnabledBinding(provider))
+                        .disabled(!installed)
+                    if !installed {
+                        Text(missingCaption(provider))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Picker(store.tr("menu_bar_source"), selection: menuBarSourceBinding) {
+                    ForEach(store.enabledProviders) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+                .disabled(store.enabledProviders.isEmpty)
+            }
+
             Section(store.tr("section_language")) {
                 Picker(store.tr("language"), selection: $store.appLanguage) {
                     ForEach(AppLanguage.allCases) { language in
@@ -65,9 +85,21 @@ struct SettingsView: View {
             }
 
             Section("Touch Bar") {
-                Toggle(store.tr("show_touch_bar"), isOn: $store.touchBarEnabled)
-                Toggle(store.tr("auto_touch_bar"), isOn: $store.touchBarWhenCodexActive)
-                    .disabled(!store.touchBarEnabled || !TouchBarSystemModal.isAvailable)
+                Picker(store.tr("touch_bar_mode"), selection: $store.touchBarDisplayMode) {
+                    Text(store.tr("touch_bar_mode_always")).tag(TouchBarDisplayMode.always)
+                    Text(store.tr("touch_bar_mode_when_relevant")).tag(TouchBarDisplayMode.whenRelevantAppFrontmost)
+                    Text(store.tr("touch_bar_mode_off")).tag(TouchBarDisplayMode.off)
+                }
+                .disabled(!TouchBarSystemModal.isAvailable)
+
+                // What the bar shows, not when — same availability gate as
+                // the mode picker above since both are meaningless without a
+                // Touch Bar (or the system-modal API) to render into.
+                Picker(store.tr("touch_bar_content"), selection: $store.touchBarContent) {
+                    Text(store.tr("touch_bar_content_automatic")).tag(TouchBarContent.automatic)
+                    Text(store.tr("touch_bar_content_both")).tag(TouchBarContent.both)
+                }
+                .disabled(!TouchBarSystemModal.isAvailable)
 
                 Text(TouchBarSystemModal.isAvailable
                      ? store.tr("touch_bar_description")
@@ -80,6 +112,35 @@ struct SettingsView: View {
         .padding(4)
         .environment(\.locale, store.appLanguage.locale)
         .frame(width: 440, height: 500)
+    }
+
+    // Mirrors `menuTitle`'s fallback: if the stored preference points at a
+    // provider that's toggled off or not installed, the picker shows the
+    // provider actually feeding the menu bar rather than an empty selection.
+    // Only the write is a direct pass-through — a fallback display never
+    // silently overwrites the stored preference.
+    private var menuBarSourceBinding: Binding<UsageProvider> {
+        Binding(
+            get: {
+                let enabled = store.enabledProviders
+                return enabled.contains(store.menuBarSource) ? store.menuBarSource : (enabled.first ?? store.menuBarSource)
+            },
+            set: { store.menuBarSource = $0 }
+        )
+    }
+
+    private func providerEnabledBinding(_ provider: UsageProvider) -> Binding<Bool> {
+        Binding(
+            get: { store.isProviderEnabled(provider) },
+            set: { store.setProviderEnabled($0, for: provider) }
+        )
+    }
+
+    private func missingCaption(_ provider: UsageProvider) -> String {
+        switch provider {
+        case .codex: return store.tr("service_missing_codex")
+        case .claude: return store.tr("service_missing_claude")
+        }
     }
 
     @ViewBuilder

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Dispatch
 import SwiftUI
 
 @MainActor
@@ -14,9 +15,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var showSettingsAfterMenuCloses = false
     private var subscriptions = Set<AnyCancellable>()
 
+    // Kept alive for the process lifetime; a signal killing the app (e.g. a
+    // preview rebuild's `pkill`) skips `applicationWillTerminate` entirely, so
+    // these are the only way to dismiss a presented system-modal Touch Bar
+    // before the process actually exits.
+    private var sigtermSource: DispatchSourceSignal?
+    private var sigintSource: DispatchSourceSignal?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         touchBarController = UsageTouchBarController(store: store)
+        installSignalHandlers()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = item
@@ -40,6 +49,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             .store(in: &subscriptions)
 
+        // Section count (and which provider feeds the status item title)
+        // changes with these without necessarily touching the fetch state
+        // above, so they need their own trigger for the button title and the
+        // popover's measured height.
+        Publishers.CombineLatest4(
+            store.$menuBarSource,
+            store.$providerEnabledCodex,
+            store.$providerEnabledClaude,
+            store.$installedProviders
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _, _, _, _ in
+            self?.updateStatusItem()
+            self?.resizeMenuContent()
+        }
+        .store(in: &subscriptions)
+
         Publishers.CombineLatest3(store.$menuIconName, store.$menuIconSize, store.$menuTextSize)
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _, _ in self?.updateStatusItem() }
@@ -62,6 +88,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .store(in: &subscriptions)
 
         updateStatusItem()
+
+        // `--self-test` is handled before the App value even exists (see
+        // CodexUsageBarMain), but this one needs the running app, so it's
+        // handled here instead.
+        if CommandLine.arguments.contains("--settings") {
+            presentSettingsWindow()
+        }
+    }
+
+    // The app is LSUIElement with no Dock icon, so the status item is
+    // normally the only way in. If it's ever unreachable (a crowded menu bar,
+    // a menu-bar-hiding utility), re-launching from Finder/Spotlight/Launchpad
+    // is the recovery path — macOS doesn't start a second instance, it sends
+    // this already-running one a reopen event instead.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        presentSettingsWindow()
+        return true
+    }
+
+    // Normal quit path (menu Quit, `NSApp.terminate`). A signal skips this —
+    // see `installSignalHandlers`.
+    func applicationWillTerminate(_ notification: Notification) {
+        touchBarController?.teardown()
+    }
+
+    // `DispatchSourceSignal` doesn't suppress the default disposition on its
+    // own, so SIG_IGN first is what stops the process from being killed
+    // before the handler (and its Touch Bar teardown) gets to run. The
+    // handler itself only touches `systemModalVisible`/AppKit state, both
+    // fine from the main queue, so no raw-signal-handler safety concerns.
+    private func installSignalHandlers() {
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { [weak self] in
+            self?.touchBarController?.teardown()
+            exit(0)
+        }
+        term.resume()
+        sigtermSource = term
+
+        let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        interrupt.setEventHandler { [weak self] in
+            self?.touchBarController?.teardown()
+            exit(0)
+        }
+        interrupt.resume()
+        sigintSource = interrupt
     }
 
     private func updateStatusItem() {

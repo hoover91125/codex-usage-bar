@@ -2,8 +2,6 @@ import AppKit
 import Combine
 import ServiceManagement
 
-private let enabledProviders: [UsageProvider] = [.codex]
-
 func usageProviderClient(for provider: UsageProvider) -> any UsageProviderClient.Type {
     switch provider {
     case .codex: return CodexUsageClient.self
@@ -34,15 +32,38 @@ final class UsageStore: ObservableObject {
     @Published var menuTextSize: Double {
         didSet { UserDefaults.standard.set(menuTextSize, forKey: "menuTextSize") }
     }
-    @Published var touchBarEnabled: Bool {
-        didSet { UserDefaults.standard.set(touchBarEnabled, forKey: "touchBarEnabled") }
+    @Published var touchBarDisplayMode: TouchBarDisplayMode {
+        didSet { UserDefaults.standard.set(touchBarDisplayMode.rawValue, forKey: "touchBarDisplayMode") }
     }
-    @Published var touchBarWhenCodexActive: Bool {
-        didSet { UserDefaults.standard.set(touchBarWhenCodexActive, forKey: "touchBarWhenCodexActive") }
+    // Orthogonal to `touchBarDisplayMode` (when the bar shows, not what it
+    // shows). No migration needed — an absent key means `.automatic`, which
+    // is today's only behavior anyway.
+    @Published var touchBarContent: TouchBarContent {
+        didSet { UserDefaults.standard.set(touchBarContent.rawValue, forKey: "touchBarContent") }
     }
     @Published var appLanguage: AppLanguage {
         didSet { UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage") }
     }
+    @Published var providerEnabledCodex: Bool {
+        didSet { UserDefaults.standard.set(providerEnabledCodex, forKey: "providerEnabledCodex") }
+    }
+    @Published var providerEnabledClaude: Bool {
+        didSet { UserDefaults.standard.set(providerEnabledClaude, forKey: "providerEnabledClaude") }
+    }
+    @Published var menuBarSource: UsageProvider {
+        didSet { UserDefaults.standard.set(menuBarSource.rawValue, forKey: "menuBarSource") }
+    }
+
+    // Populated off the main actor at the start of every refresh cycle.
+    // `isInstalled()` spawns a subprocess for both providers, so it must never
+    // run from a computed property or view body — this cache is what those
+    // read instead.
+    @Published private(set) var installedProviders: Set<UsageProvider> = []
+
+    // False until the first `refreshInstalledProviders()` completes, so the
+    // popover can tell "not yet probed" (render as loading) apart from
+    // "probed and genuinely missing" (render the unavailable line).
+    @Published private(set) var installationProbed = false
 
     // Non-UsageClientError fetch failures, keyed the same way as `errors` so
     // errorMessage(for:) can fall back to them.
@@ -57,15 +78,40 @@ final class UsageStore: ObservableObject {
 
     private var refreshTask: Task<Void, Never>?
     private var pendingRefresh = false
+    private var pendingForce = false
+
+    // Attempt (not success) timestamps, so a failed request still counts
+    // against the provider's throttle — it still cost a request.
+    private var lastAttempt: [UsageProvider: Date] = [:]
+
+    // A 429 is a hard "back off" signal from the server: the provider is
+    // skipped until this deadline even under a forced refresh.
+    private var cooldownUntil: [UsageProvider: Date] = [:]
 
     init() {
         let defaults = UserDefaults.standard
         menuIconName = defaults.string(forKey: "menuIconName") ?? "gauge.with.dots.needle.67percent"
         menuIconSize = defaults.object(forKey: "menuIconSize") as? Double ?? 12
         menuTextSize = defaults.object(forKey: "menuTextSize") as? Double ?? 12
-        touchBarEnabled = defaults.object(forKey: "touchBarEnabled") as? Bool ?? true
-        touchBarWhenCodexActive = defaults.object(forKey: "touchBarWhenCodexActive") as? Bool ?? true
+        if let stored = defaults.string(forKey: "touchBarDisplayMode").flatMap(TouchBarDisplayMode.init(rawValue:)) {
+            touchBarDisplayMode = stored
+        } else if defaults.object(forKey: "touchBarEnabled") != nil {
+            // One-time migration from the old two-boolean scheme. The old
+            // keys are left untouched (unused from here on) so this stays
+            // inspectable/reversible rather than destructive.
+            let wasEnabled = defaults.bool(forKey: "touchBarEnabled")
+            let wasCodexOnly = defaults.object(forKey: "touchBarWhenCodexActive") as? Bool ?? true
+            let migrated: TouchBarDisplayMode = !wasEnabled ? .off : (wasCodexOnly ? .whenRelevantAppFrontmost : .always)
+            touchBarDisplayMode = migrated
+            defaults.set(migrated.rawValue, forKey: "touchBarDisplayMode")
+        } else {
+            touchBarDisplayMode = .always
+        }
+        touchBarContent = defaults.string(forKey: "touchBarContent").flatMap(TouchBarContent.init(rawValue:)) ?? .automatic
         appLanguage = defaults.string(forKey: "appLanguage").flatMap(AppLanguage.init(rawValue:)) ?? .system
+        providerEnabledCodex = defaults.object(forKey: "providerEnabledCodex") as? Bool ?? true
+        providerEnabledClaude = defaults.object(forKey: "providerEnabledClaude") as? Bool ?? true
+        menuBarSource = defaults.string(forKey: "menuBarSource").flatMap(UsageProvider.init(rawValue:)) ?? .codex
         refresh()
         refreshTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -80,6 +126,37 @@ final class UsageStore: ObservableObject {
         refreshTask?.cancel()
     }
 
+    /// Providers the user has toggled on and that are actually present on
+    /// this machine. This is the fetch list — it's right that it excludes a
+    /// provider that can't be fetched. Reads the cached `installedProviders`
+    /// rather than probing `isInstalled()` itself, so this is cheap to call
+    /// from a view body.
+    var enabledProviders: [UsageProvider] {
+        UsageProvider.allCases.filter { isProviderEnabled($0) && installedProviders.contains($0) }
+    }
+
+    /// Providers the user has toggled on, regardless of whether they're
+    /// installed. The popover iterates this (not `enabledProviders`) so a
+    /// toggled-on-but-missing provider still gets a section that can explain
+    /// itself, instead of silently vanishing.
+    var toggledOnProviders: [UsageProvider] {
+        UsageProvider.allCases.filter { isProviderEnabled($0) }
+    }
+
+    func isProviderEnabled(_ provider: UsageProvider) -> Bool {
+        switch provider {
+        case .codex: return providerEnabledCodex
+        case .claude: return providerEnabledClaude
+        }
+    }
+
+    func setProviderEnabled(_ enabled: Bool, for provider: UsageProvider) {
+        switch provider {
+        case .codex: providerEnabledCodex = enabled
+        case .claude: providerEnabledClaude = enabled
+        }
+    }
+
     func snapshot(for provider: UsageProvider) -> ProviderSnapshot? {
         snapshots[provider]
     }
@@ -91,23 +168,14 @@ final class UsageStore: ObservableObject {
         return otherErrors[provider]
     }
 
-    // Phase 1 has exactly one provider; these keep the existing UI call sites
-    // (UsagePopover, AppDelegate, UsageTouchBarController) working unchanged.
-    // settingsErrorMessage takes precedence, matching the old single
-    // `errorMessage`'s last-write-wins behavior between a fetch failure and a
-    // settings-action failure: refresh() clears settingsErrorMessage, so a
-    // fetch failure after a settings failure wins; a settings failure after a
-    // fetch failure wins here since it's checked first.
-    var primarySnapshot: ProviderSnapshot? { snapshot(for: .codex) }
-    var primaryErrorMessage: String? { settingsErrorMessage ?? errorMessage(for: .codex) }
-
     var menuTitle: String {
-        if let snapshot = primarySnapshot {
-            let fiveHour = snapshot.primary.map { "\($0.remainingPercent)%" } ?? "–"
-            let weekly = snapshot.secondary.map { "\($0.remainingPercent)%" } ?? "–"
-            return "\(fiveHour)·\(weekly)"
+        let provider = enabledProviders.contains(menuBarSource) ? menuBarSource : enabledProviders.first
+        guard let provider, let snapshot = snapshot(for: provider) else {
+            return isLoading ? "…" : "!"
         }
-        return isLoading ? "…" : "!"
+        let fiveHour = snapshot.primary.map { "\($0.remainingPercent)%" } ?? "–"
+        let weekly = snapshot.secondary.map { "\($0.remainingPercent)%" } ?? "–"
+        return "\(fiveHour)·\(weekly)"
     }
 
     func tr(_ key: String) -> String {
@@ -125,33 +193,78 @@ final class UsageStore: ObservableObject {
         return formatter.string(from: date)
     }
 
-    /// Refreshes if the snapshot is older than `maxAge`, otherwise does nothing.
+    /// Refreshes if the oldest enabled provider's snapshot is older than
+    /// `maxAge`, or if any enabled provider has no snapshot at all yet.
     func refreshIfStale(olderThan maxAge: TimeInterval = 60) {
-        guard let snapshot = primarySnapshot else {
+        let providers = enabledProviders
+        guard !providers.isEmpty else { return }
+        let fetchedAts = providers.compactMap { snapshots[$0]?.fetchedAt }
+        if fetchedAts.count < providers.count {
             refresh()
             return
         }
-        if Date().timeIntervalSince(snapshot.fetchedAt) >= maxAge { refresh() }
+        if let oldest = fetchedAts.min(), Date().timeIntervalSince(oldest) >= maxAge {
+            refresh()
+        }
     }
 
-    func refresh() {
-        // A request arriving mid-flight is queued rather than dropped, so a wake
-        // or timer tick during a slow fetch still produces fresh data.
+    /// The floor between fetch attempts for a provider. Codex is a local
+    /// subprocess with nothing to throttle; Claude's `/api/oauth/usage` is
+    /// rate limited (Claude Code itself caches it for 5 minutes), so we match
+    /// that cadence to avoid HTTP 429s.
+    func minimumRefreshInterval(for provider: UsageProvider) -> TimeInterval {
+        switch provider {
+        case .codex: return 0
+        case .claude: return 300
+        }
+    }
+
+    /// `force: true` bypasses the per-provider throttle (but never the 429
+    /// cooldown) — only the popover's manual Refresh button does this. The
+    /// timer, the wake-from-sleep handler, and `refreshIfStale` all call the
+    /// non-forced form.
+    func refresh(force: Bool = false) {
+        // A request arriving mid-flight is queued rather than dropped, so a
+        // wake or timer tick during a slow fetch still produces fresh data.
+        // A forced request must not be downgraded by a coalesced non-forced
+        // one, so pendingForce only ever grows until it's consumed.
         guard !isLoading else {
             pendingRefresh = true
+            pendingForce = pendingForce || force
             return
         }
-        pendingRefresh = false
         isLoading = true
         settingsErrorMessage = nil
+
+        Task { [weak self] in
+            await self?.runRefreshCycle(force: force)
+        }
+    }
+
+    private func runRefreshCycle(force: Bool) async {
+        await refreshInstalledProviders()
+
+        let now = Date()
+        var providersToFetch: [UsageProvider] = []
         for provider in enabledProviders {
-            errors[provider] = nil
-            otherErrors[provider] = nil
+            // A 429 cooldown is a hard skip, even under force.
+            if let cooldown = cooldownUntil[provider], cooldown > now { continue }
+            if !force, let last = lastAttempt[provider],
+               now.timeIntervalSince(last) < minimumRefreshInterval(for: provider) {
+                continue
+            }
+            providersToFetch.append(provider)
         }
 
-        Task {
+        if !providersToFetch.isEmpty {
+            for provider in providersToFetch {
+                lastAttempt[provider] = Date()
+                errors[provider] = nil
+                otherErrors[provider] = nil
+            }
+
             await withTaskGroup(of: (UsageProvider, FetchOutcome).self) { group in
-                for provider in enabledProviders {
+                for provider in providersToFetch {
                     group.addTask {
                         do {
                             let snapshot = try await Task.detached(priority: .userInitiated) {
@@ -169,20 +282,37 @@ final class UsageStore: ObservableObject {
                     switch outcome {
                     case .success(let snapshot):
                         snapshots[provider] = snapshot
+                        cooldownUntil[provider] = nil
                     case .clientError(let error):
                         errors[provider] = error
+                        if case .httpStatus(429) = error {
+                            cooldownUntil[provider] = Date().addingTimeInterval(60)
+                        }
                     case .other(let message):
                         otherErrors[provider] = message
                     }
                 }
             }
-            isLoading = false
-            if pendingRefresh { refresh() }
+        }
+
+        isLoading = false
+        if pendingRefresh {
+            pendingRefresh = false
+            let nextForce = pendingForce
+            pendingForce = false
+            refresh(force: nextForce)
         }
     }
 
-    func openDashboard() {
-        NSWorkspace.shared.open(usageDashboardURL)
+    private func refreshInstalledProviders() async {
+        installedProviders = await Task.detached(priority: .utility) {
+            Set(UsageProvider.allCases.filter { usageProviderClient(for: $0).isInstalled() })
+        }.value
+        installationProbed = true
+    }
+
+    func openDashboard(for provider: UsageProvider) {
+        NSWorkspace.shared.open(provider.dashboardURL)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
