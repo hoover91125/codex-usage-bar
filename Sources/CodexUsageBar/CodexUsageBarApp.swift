@@ -5,6 +5,7 @@ import ServiceManagement
 import SwiftUI
 
 private let usageDashboardURL = URL(string: "https://chatgpt.com/codex/settings/usage")!
+private let usageMenuContentWidth: CGFloat = 330
 
 struct RateWindow: Sendable {
     let usedPercent: Int
@@ -113,21 +114,18 @@ enum CodexUsageClient {
         }
 
         var responseData = Data()
-        while process.isRunning {
+        while true {
             let chunk = output.fileHandleForReading.availableData
             if chunk.isEmpty { break }
             responseData.append(chunk)
-            if containsResponse(id: 2, in: responseData) {
-                process.terminate()
-                break
-            }
+            if containsResponse(id: 2, in: responseData) { break }
         }
         try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
         process.waitUntilExit()
         timeout.cancel()
 
-        if timedOut.value && responseData.isEmpty {
+        if timedOut.value && !containsResponse(id: 2, in: responseData) {
             throw UsageClientError.timedOut
         }
 
@@ -274,6 +272,7 @@ final class UsageStore: ObservableObject {
 
     private var refreshTask: Task<Void, Never>?
     private var lastUsageError: UsageClientError?
+    private var pendingRefresh = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -321,8 +320,23 @@ final class UsageStore: ObservableObject {
         return formatter.string(from: date)
     }
 
+    /// Refreshes if the snapshot is older than `maxAge`, otherwise does nothing.
+    func refreshIfStale(olderThan maxAge: TimeInterval = 60) {
+        guard let snapshot else {
+            refresh()
+            return
+        }
+        if Date().timeIntervalSince(snapshot.fetchedAt) >= maxAge { refresh() }
+    }
+
     func refresh() {
-        guard !isLoading else { return }
+        // A request arriving mid-flight is queued rather than dropped, so a wake
+        // or timer tick during a slow fetch still produces fresh data.
+        guard !isLoading else {
+            pendingRefresh = true
+            return
+        }
+        pendingRefresh = false
         isLoading = true
         errorMessage = nil
         lastUsageError = nil
@@ -340,6 +354,7 @@ final class UsageStore: ObservableObject {
                 errorMessage = error.localizedDescription
             }
             isLoading = false
+            if pendingRefresh { refresh() }
         }
     }
 
@@ -496,7 +511,7 @@ struct UsagePopover: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .environment(\.locale, store.appLanguage.locale)
-        .frame(width: 330)
+        .frame(width: usageMenuContentWidth)
     }
 
     private func creditLabel(_ snapshot: UsageSnapshot) -> String {
@@ -912,6 +927,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem?
     private var usageMenu: NSMenu?
+    private var menuContentView: NSHostingView<UsagePopover>?
     private var settingsWindow: NSWindow?
     private var touchBarController: UsageTouchBarController?
     private var showSettingsAfterMenuCloses = false
@@ -938,6 +954,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _, _ in
                 self?.updateStatusItem()
+                self?.resizeMenuContent()
             }
             .store(in: &subscriptions)
 
@@ -951,7 +968,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.settingsWindow?.title = self.store.tr("settings_window_title")
+                self.resizeMenuContent()
             }
+            .store(in: &subscriptions)
+
+        // The 5-minute poll does not run while the machine is asleep, so data is
+        // stale by up to that long after waking.
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.store.refresh() }
             .store(in: &subscriptions)
 
         updateStatusItem()
@@ -988,7 +1013,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func makeUsageMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.minimumWidth = 330
+        menu.minimumWidth = usageMenuContentWidth
         menu.delegate = self
 
         let contentItem = NSMenuItem()
@@ -996,12 +1021,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             store: store,
             onShowSettings: { [weak self] in self?.requestSettings() }
         ))
-        hostingView.frame = NSRect(x: 0, y: 0, width: 330, height: 365)
+        hostingView.sizingOptions = [.intrinsicContentSize]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        menuContentView = hostingView
+        resizeMenuContent()
         contentItem.view = hostingView
         menu.addItem(contentItem)
         return menu
+    }
+
+    /// The popover grows and shrinks with its content (error rows, credit rows,
+    /// translated string lengths), so the host view is measured rather than
+    /// pinned to a fixed height.
+    private func resizeMenuContent() {
+        guard let hostingView = menuContentView else { return }
+        let height = max(1, ceil(hostingView.fittingSize.height))
+        guard abs(hostingView.frame.height - height) > 0.5 || hostingView.frame.width != usageMenuContentWidth else { return }
+        hostingView.frame = NSRect(x: 0, y: 0, width: usageMenuContentWidth, height: height)
     }
 
     private func requestSettings() {
@@ -1011,6 +1048,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         showSettingsAfterMenuCloses = true
         usageMenu?.cancelTrackingWithoutAnimation()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        resizeMenuContent()
+        store.refreshIfStale()
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -1040,28 +1082,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-@main
 struct CodexUsageBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    init() {
-        if CommandLine.arguments.contains("--self-test") {
-            do {
-                let snapshot = try CodexUsageClient.fetch()
-                let primary = snapshot.primary?.remainingPercent.description ?? "n/a"
-                let secondary = snapshot.secondary?.remainingPercent.description ?? "n/a"
-                print("OK 5h=\(primary)% weekly=\(secondary)% resets=\(snapshot.resetCredits)")
-                exit(EXIT_SUCCESS)
-            } catch {
-                fputs("ERROR \(error.localizedDescription)\n", stderr)
-                exit(EXIT_FAILURE)
-            }
-        }
-    }
 
     var body: some Scene {
         Settings {
             EmptyView()
+        }
+    }
+}
+
+@main
+enum CodexUsageBarMain {
+    @MainActor
+    static func main() {
+        // Runs before the App value exists, so a self-test never builds the
+        // AppDelegate, its UsageStore, or the background refresh timer.
+        if CommandLine.arguments.contains("--self-test") {
+            runSelfTest()
+        }
+        CodexUsageBarApp.main()
+    }
+
+    private static func runSelfTest() -> Never {
+        do {
+            let snapshot = try CodexUsageClient.fetch()
+            let primary = snapshot.primary?.remainingPercent.description ?? "n/a"
+            let secondary = snapshot.secondary?.remainingPercent.description ?? "n/a"
+            print("OK 5h=\(primary)% weekly=\(secondary)% resets=\(snapshot.resetCredits)")
+            exit(EXIT_SUCCESS)
+        } catch {
+            fputs("ERROR \(error.localizedDescription)\n", stderr)
+            exit(EXIT_FAILURE)
         }
     }
 }

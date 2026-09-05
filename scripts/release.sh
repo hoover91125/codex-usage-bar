@@ -21,7 +21,7 @@ archive_path="$dist_dir/Codex-Usage-Bar-v$version.zip"
 checksum_path="$archive_path.sha256"
 
 plutil -lint "$app_path/Contents/Info.plist"
-codesign --verify --deep --strict "$app_path"
+codesign --verify --strict "$app_path"
 
 if [[ -e "$archive_path" ]]; then
   rm -f "$archive_path"

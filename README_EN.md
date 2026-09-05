@@ -41,8 +41,8 @@ Community builds without Developer ID signing and notarization may display addit
 ### Build from source
 
 ```bash
-git clone https://github.com/yizhigou/codex-usage-bar.git
-cd CodexUsageBar
+git clone https://github.com/hoover91125/codex-usage-bar.git
+cd codex-usage-bar
 ./build-app.sh dist
 open "dist/Codex Usage Bar.app"
 ```

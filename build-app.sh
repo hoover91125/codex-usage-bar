@@ -51,7 +51,7 @@ cp "$asset_output/Assets.car" "$app_dir/Contents/Resources/Assets.car"
 cp "$asset_output/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
 chmod +x "$app_dir/Contents/MacOS/CodexUsageBar"
 
-codesign_args=(--force --deep --sign "$sign_identity")
+codesign_args=(--force --sign "$sign_identity")
 if [[ "$sign_identity" != "-" ]]; then
   codesign_args+=(--options runtime --timestamp)
 fi
