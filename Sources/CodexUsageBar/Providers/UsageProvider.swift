@@ -1,6 +1,6 @@
 import Foundation
 
-enum UsageProvider: String, CaseIterable, Identifiable, Sendable {
+enum UsageProvider: String, CaseIterable, Identifiable, Sendable, Codable {
     case codex
     case claude
 
@@ -22,7 +22,7 @@ enum UsageProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-struct RateWindow: Sendable {
+struct RateWindow: Sendable, Codable {
     let usedPercent: Int
     let durationMinutes: Int?
     let resetsAt: Date?
@@ -32,18 +32,18 @@ struct RateWindow: Sendable {
 
 /// An extra, provider-specific window (e.g. Claude's per-model weekly limits).
 /// Empty for Codex.
-struct NamedWindow: Sendable {
+struct NamedWindow: Sendable, Codable {
     let name: String
     let window: RateWindow
 }
 
-struct CreditInfo: Sendable {
+struct CreditInfo: Sendable, Codable {
     let balance: String?
     let unlimited: Bool
     let resetCount: Int
 }
 
-struct ProviderSnapshot: Sendable {
+struct ProviderSnapshot: Sendable, Codable {
     let provider: UsageProvider
     let primary: RateWindow?
     let secondary: RateWindow?
@@ -63,6 +63,10 @@ enum UsageClientError: LocalizedError, Sendable {
     case claudeTokenExpired
     case claudeNotSubscribed
     case httpStatus(Int)
+    /// HTTP 429 with the server's `Retry-After` in seconds when it sent one.
+    /// Split out from `httpStatus` because it's the one status the store has
+    /// to act on rather than just display.
+    case rateLimited(TimeInterval?)
     case network(String)
 
     func message(language: AppLanguage) -> String {
@@ -90,6 +94,8 @@ enum UsageClientError: LocalizedError, Sendable {
                 return L10n.string("error_claude_token_expired", language: language)
             }
             return L10n.format("error_http_status", language: language, code)
+        case .rateLimited:
+            return L10n.string("error_rate_limited", language: language)
         case .network(let message):
             return L10n.format("error_network", language: language, message)
         }

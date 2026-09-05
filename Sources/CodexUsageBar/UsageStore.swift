@@ -41,6 +41,12 @@ final class UsageStore: ObservableObject {
     @Published var touchBarContent: TouchBarContent {
         didSet { UserDefaults.standard.set(touchBarContent.rawValue, forKey: "touchBarContent") }
     }
+    /// Only meaningful while `touchBarContent == .both`: swaps the four
+    /// separate provider/window items for one grouped item per provider,
+    /// which frees enough width to also show both providers' reset times.
+    @Published var touchBarBothCompact: Bool {
+        didSet { UserDefaults.standard.set(touchBarBothCompact, forKey: "touchBarBothCompact") }
+    }
     @Published var appLanguage: AppLanguage {
         didSet { UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage") }
     }
@@ -80,6 +86,18 @@ final class UsageStore: ObservableObject {
     private var pendingRefresh = false
     private var pendingForce = false
 
+    /// Snapshots and throttle state survive a relaunch. Without this, every
+    /// restart looked like a fresh install: no `lastAttempt`, so Claude was
+    /// fetched immediately, and a few restarts in a row was enough to earn a
+    /// 429 no matter how conservative the in-process throttle was.
+    private struct PersistedCache: Codable {
+        var snapshots: [String: ProviderSnapshot]
+        var lastAttempt: [String: Date]
+        var cooldownUntil: [String: Date]
+    }
+
+    private static let cacheDefaultsKey = "usageCacheV1"
+
     // Attempt (not success) timestamps, so a failed request still counts
     // against the provider's throttle — it still cost a request.
     private var lastAttempt: [UsageProvider: Date] = [:]
@@ -108,18 +126,63 @@ final class UsageStore: ObservableObject {
             touchBarDisplayMode = .always
         }
         touchBarContent = defaults.string(forKey: "touchBarContent").flatMap(TouchBarContent.init(rawValue:)) ?? .automatic
+        touchBarBothCompact = defaults.object(forKey: "touchBarBothCompact") as? Bool ?? false
         appLanguage = defaults.string(forKey: "appLanguage").flatMap(AppLanguage.init(rawValue:)) ?? .system
         providerEnabledCodex = defaults.object(forKey: "providerEnabledCodex") as? Bool ?? true
         providerEnabledClaude = defaults.object(forKey: "providerEnabledClaude") as? Bool ?? true
         menuBarSource = defaults.string(forKey: "menuBarSource").flatMap(UsageProvider.init(rawValue:)) ?? .codex
+
+        // Before the first `refresh()`, so a relaunch inside a provider's
+        // minimum interval shows the cached numbers and skips the request.
+        loadCache()
         refresh()
+
+        // The tick is deliberately shorter than any provider's minimum
+        // interval: it decides only *when eligibility is checked*, while
+        // `minimumRefreshInterval` decides who actually gets fetched. A tick
+        // equal to the interval (the old 300s) meant a cycle that started a
+        // fraction of a second late pushed the next Claude fetch out by a
+        // whole extra period.
         refreshTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
                 guard !Task.isCancelled, let self else { return }
                 self.refresh()
             }
         }
+    }
+
+    private func loadCache() {
+        guard let data = UserDefaults.standard.data(forKey: Self.cacheDefaultsKey),
+              let cache = try? JSONDecoder().decode(PersistedCache.self, from: data) else { return }
+
+        let now = Date()
+        for (raw, snapshot) in cache.snapshots {
+            guard let provider = UsageProvider(rawValue: raw) else { continue }
+            snapshots[provider] = snapshot
+        }
+        // A timestamp in the future can only come from a clock change, and
+        // honouring one would throttle the provider until the clock caught up
+        // — so those are dropped rather than trusted.
+        for (raw, date) in cache.lastAttempt {
+            guard let provider = UsageProvider(rawValue: raw), date <= now else { continue }
+            lastAttempt[provider] = date
+        }
+        for (raw, date) in cache.cooldownUntil {
+            guard let provider = UsageProvider(rawValue: raw),
+                  date > now,
+                  date.timeIntervalSince(now) <= maxBackoff else { continue }
+            cooldownUntil[provider] = date
+        }
+    }
+
+    private func saveCache() {
+        var cache = PersistedCache(snapshots: [:], lastAttempt: [:], cooldownUntil: [:])
+        for (provider, snapshot) in snapshots { cache.snapshots[provider.rawValue] = snapshot }
+        for (provider, date) in lastAttempt { cache.lastAttempt[provider.rawValue] = date }
+        for (provider, date) in cooldownUntil { cache.cooldownUntil[provider.rawValue] = date }
+        guard let data = try? JSONEncoder().encode(cache) else { return }
+        UserDefaults.standard.set(data, forKey: Self.cacheDefaultsKey)
     }
 
     deinit {
@@ -219,6 +282,22 @@ final class UsageStore: ObservableObject {
         }
     }
 
+    /// The floor a *forced* refresh still respects. `force` exists so the
+    /// popover's Refresh button feels immediate, but letting it bypass the
+    /// throttle entirely means repeated taps go straight to Claude's rate
+    /// limiter — so it shortens the window rather than removing it. Codex is
+    /// a local subprocess, so there is nothing to protect.
+    func forcedMinimumRefreshInterval(for provider: UsageProvider) -> TimeInterval {
+        switch provider {
+        case .codex: return 0
+        case .claude: return 60
+        }
+    }
+
+    /// Upper bound on a 429 back-off, so a server sending an implausible
+    /// `Retry-After` (or a bad cached value) can't wedge a provider.
+    private var maxBackoff: TimeInterval { 3600 }
+
     /// `force: true` bypasses the per-provider throttle (but never the 429
     /// cooldown) — only the popover's manual Refresh button does this. The
     /// timer, the wake-from-sleep handler, and `refreshIfStale` all call the
@@ -249,8 +328,10 @@ final class UsageStore: ObservableObject {
         for provider in enabledProviders {
             // A 429 cooldown is a hard skip, even under force.
             if let cooldown = cooldownUntil[provider], cooldown > now { continue }
-            if !force, let last = lastAttempt[provider],
-               now.timeIntervalSince(last) < minimumRefreshInterval(for: provider) {
+            let floor = force
+                ? forcedMinimumRefreshInterval(for: provider)
+                : minimumRefreshInterval(for: provider)
+            if let last = lastAttempt[provider], now.timeIntervalSince(last) < floor {
                 continue
             }
             providersToFetch.append(provider)
@@ -285,8 +366,8 @@ final class UsageStore: ObservableObject {
                         cooldownUntil[provider] = nil
                     case .clientError(let error):
                         errors[provider] = error
-                        if case .httpStatus(429) = error {
-                            cooldownUntil[provider] = Date().addingTimeInterval(60)
+                        if let backoff = backoffInterval(for: error, provider: provider) {
+                            cooldownUntil[provider] = Date().addingTimeInterval(backoff)
                         }
                     case .other(let message):
                         otherErrors[provider] = message
@@ -295,6 +376,7 @@ final class UsageStore: ObservableObject {
             }
         }
 
+        saveCache()
         isLoading = false
         if pendingRefresh {
             pendingRefresh = false
@@ -302,6 +384,23 @@ final class UsageStore: ObservableObject {
             pendingForce = false
             refresh(force: nextForce)
         }
+    }
+
+    /// How long to skip a provider after a rate-limit response. The server's
+    /// `Retry-After` wins when it sends one; otherwise the provider's own
+    /// minimum interval is the right guess, since that's the cadence the API
+    /// is documented to tolerate. The old flat 60s was shorter than that
+    /// interval, so a back-off could expire while the provider was still
+    /// being rate limited.
+    private func backoffInterval(for error: UsageClientError, provider: UsageProvider) -> TimeInterval? {
+        let retryAfter: TimeInterval?
+        switch error {
+        case .rateLimited(let seconds): retryAfter = seconds
+        case .httpStatus(429): retryAfter = nil
+        default: return nil
+        }
+        let suggested = retryAfter ?? minimumRefreshInterval(for: provider)
+        return min(max(suggested, 60), maxBackoff)
     }
 
     private func refreshInstalledProviders() async {

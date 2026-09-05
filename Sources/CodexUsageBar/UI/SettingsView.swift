@@ -101,6 +101,12 @@ struct SettingsView: View {
                 }
                 .disabled(!TouchBarSystemModal.isAvailable)
 
+                // Only affects `.both`, so it's disabled rather than hidden
+                // in the other mode — hiding it would make the Touch Bar
+                // section change height as the picker above changes.
+                Toggle(store.tr("touch_bar_both_compact"), isOn: $store.touchBarBothCompact)
+                    .disabled(!TouchBarSystemModal.isAvailable || store.touchBarContent != .both)
+
                 Text(TouchBarSystemModal.isAvailable
                      ? store.tr("touch_bar_description")
                      : store.tr("touch_bar_unavailable"))

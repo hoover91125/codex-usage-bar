@@ -57,12 +57,36 @@ enum ClaudeUsageClient: UsageProviderClient {
         guard let http = responseHTTP, let data = responseData else {
             throw UsageClientError.invalidResponse
         }
+        if http.statusCode == 429 {
+            throw UsageClientError.rateLimited(retryAfterSeconds(http))
+        }
         guard (200...299).contains(http.statusCode) else {
             throw UsageClientError.httpStatus(http.statusCode)
         }
 
         return try parse(data, plan: credentials.subscriptionType)
     }
+
+    /// `Retry-After` is either a delay in seconds or an HTTP date; both forms
+    /// are accepted, and anything else (or a header the server didn't send)
+    /// leaves the back-off length to the caller.
+    private static func retryAfterSeconds(_ response: HTTPURLResponse) -> TimeInterval? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
+        if let seconds = TimeInterval(value) {
+            return max(0, seconds)
+        }
+        guard let date = httpDateFormatter.date(from: value) else { return nil }
+        return max(0, date.timeIntervalSinceNow)
+    }
+
+    private static let httpDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter
+    }()
 
     private static func parse(_ data: Data, plan: String?) throws -> ProviderSnapshot {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
