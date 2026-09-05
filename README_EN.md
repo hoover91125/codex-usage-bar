@@ -4,28 +4,30 @@
 
 <h1 align="center">Codex Usage Bar</h1>
 
-<p align="center">See your remaining Codex usage in the macOS menu bar and Touch Bar.</p>
+<p align="center">See your remaining Codex and Claude usage in the macOS menu bar and Touch Bar.</p>
 
 <p align="center"><a href="README.md">中文</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a></p>
 
 > [!IMPORTANT]
-> This is an unofficial community project. It is not affiliated with, sponsored by, or endorsed by OpenAI. The local Codex app-server interface and persistent Touch Bar behavior may change without notice.
+> This is an unofficial community project. It is not affiliated with, sponsored by, or endorsed by OpenAI or Anthropic. The local Codex app-server interface, the Claude usage endpoint, and persistent Touch Bar behavior may change without notice.
 
 ## Features
 
-- Shows five-hour and weekly remaining usage in the menu bar.
+- Shows five-hour and weekly remaining usage in the menu bar, for Codex or Claude.
+- Codex and Claude side by side: Claude usage comes from the Claude Code login on this Mac and includes per-model weekly windows such as Opus and Sonnet.
 - Uses a native macOS menu for progress, reset times, credits, and resets.
 - Configurable menu bar icon, icon size, and text size.
 - Follows the system language by default, with in-app switching between Simplified Chinese, Traditional Chinese, English, Japanese, Korean, and Spanish.
-- Optional launch at login and automatic refresh every five minutes.
-- Touch Bar progress, percentages, reset times, and manual refresh.
+- Optional launch at login. Codex refreshes every minute; Claude is requested at most every five minutes.
+- Touch Bar progress, percentages, reset times, and manual refresh, for one provider or both.
 - Optional automatic Touch Bar presentation while Codex is frontmost.
 - No third-party dependencies and no separate API key.
 
 ## Requirements
 
 - macOS 14.0 or later.
-- Codex desktop installed and signed in, or a compatible `codex` executable in a common installation path.
+- For Codex: Codex desktop installed and signed in, or a compatible `codex` executable in a common installation path.
+- For Claude: Claude Code signed in on this Mac (CLI or VS Code extension). Each provider can be switched off in Settings, so either one alone is enough.
 - Touch Bar features require a Touch Bar-equipped MacBook Pro. The menu bar works on other Macs.
 
 ## Install
@@ -55,15 +57,26 @@ CODEX_USAGE_ARCHS="$(uname -m)" ./build-app.sh dist
 
 ## How it works
 
+### Codex
+
 The app launches the locally installed:
 
 ```text
 codex app-server --stdio
 ```
 
-and sends the read-only `account/rateLimits/read` request. It does not read or store cookies, access tokens, or conversation content, and contains no telemetry or third-party analytics.
+and sends the read-only `account/rateLimits/read` request. It does not read or store cookies, access tokens, or conversation content.
 
-See [docs/PRIVACY.md](docs/PRIVACY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+### Claude
+
+Claude usage comes from the Claude Code login on this Mac:
+
+1. The app first reads the usage that Claude Code itself caches in its config file `~/.claude.json` (`cachedUsageUtilization`), read-only. While that copy is less than five minutes old, no request is made at all.
+2. When it is stale, the app reads Claude Code's access token from the macOS Keychain item `Claude Code-credentials` (or `~/.claude/.credentials.json`) and sends one read-only request to `https://api.anthropic.com/api/oauth/usage`. The token stays in memory only for that request; it is never written to disk or logged, and the refresh token is never read.
+
+The endpoint is rate limited per account, and the budget is shared with Claude Code itself and any other tool that polls it. After an HTTP 429 the app waits five minutes, doubling on each consecutive 429 up to one hour.
+
+The app contains no telemetry or third-party analytics. See [docs/PRIVACY.md](docs/PRIVACY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Touch Bar compatibility
 
