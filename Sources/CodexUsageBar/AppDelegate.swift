@@ -73,6 +73,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .sink { [weak self] _, _, _, _ in self?.updateStatusItem() }
             .store(in: &subscriptions)
 
+        // The title's color, not its text: neither the tint switch nor the
+        // thresholds move a snapshot, so they need their own trigger.
+        Publishers.CombineLatest3(
+            store.$menuBarTintEnabled,
+            store.$warningRemainingPercent,
+            store.$criticalRemainingPercent
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _, _, _ in self?.updateStatusItem() }
+        .store(in: &subscriptions)
+
         store.$appLanguage
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -148,18 +159,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let textFont = NSFont.monospacedDigitSystemFont(ofSize: pointSize, weight: .medium)
         let baselineOffset = -max(0.5, round(pointSize * 0.08 * 2) / 2)
         button.font = textFont
-        // No explicit foreground color: the status bar button's cell fills
-        // in the color for its state, which is what dims the title along
-        // with the template icon on a display the menu bar is inactive on.
-        // An explicit `labelColor` here kept the text at full brightness
-        // there while every neighbouring item faded.
-        button.attributedTitle = NSAttributedString(
-            string: store.menuTitle,
-            attributes: [
-                .font: textFont,
-                .baselineOffset: baselineOffset
-            ]
-        )
+
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: textFont,
+            .baselineOffset: baselineOffset
+        ]
+        // A color is set only once a window has actually fallen past a
+        // threshold. At `.normal` the attribute is deliberately left off: the
+        // status bar button's cell fills in the color for its state, which is
+        // what dims the title along with the template icon on a display whose
+        // menu bar is inactive, and an explicit `labelColor` kept the text at
+        // full brightness there while every neighbouring item faded. An alert
+        // color is worth losing that for — it is supposed to stand out — but
+        // the resting state should keep behaving like every other menu item.
+        let level = store.menuTitleAlertLevel
+        if store.menuBarTintEnabled, level != .normal {
+            attributes[.foregroundColor] = level.nsColor
+        }
+        button.attributedTitle = NSAttributedString(string: store.menuTitle, attributes: attributes)
 
         if store.menuIconName == "none" {
             button.image = nil
@@ -227,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func presentSettingsWindow() {
         if settingsWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 640),
+                contentRect: NSRect(x: 0, y: 0, width: settingsWindowSize.width, height: settingsWindowSize.height),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false

@@ -32,6 +32,34 @@ struct RateWindow: Sendable, Codable {
     /// both derived percentages are clamped and always sum to 100.
     var usedPercentClamped: Int { max(0, min(100, usedPercent)) }
     var remainingPercent: Int { 100 - usedPercentClamped }
+
+    /// How far through the window we are, 0…1. Needs both the window's length
+    /// and its reset time, so it is nil for the per-model weekly limits, whose
+    /// length the endpoint doesn't state.
+    func elapsedFraction(now: Date = Date()) -> Double? {
+        guard let durationMinutes, durationMinutes > 0, let resetsAt else { return nil }
+        let total = Double(durationMinutes) * 60
+        let remaining = resetsAt.timeIntervalSince(now)
+        guard remaining.isFinite else { return nil }
+        return max(0, min(1, (total - remaining) / total))
+    }
+
+    /// The percentage a perfectly even burn would have reached by now — the
+    /// "pace" mark the progress bars draw. Being past it means the window is
+    /// being spent faster than it refills.
+    func expectedUsedPercent(now: Date = Date()) -> Int? {
+        guard let fraction = elapsedFraction(now: now) else { return nil }
+        return Int((fraction * 100).rounded())
+    }
+
+    /// Used relative to elapsed: 1.0 is exactly on pace, 2.0 is burning twice
+    /// as fast as the window refills. Nil until enough of the window has
+    /// passed for the ratio to mean anything — early on, one request looks
+    /// like an infinite burn rate.
+    func paceRatio(now: Date = Date()) -> Double? {
+        guard let fraction = elapsedFraction(now: now), fraction >= 0.1 else { return nil }
+        return (Double(usedPercentClamped) / 100) / fraction
+    }
 }
 
 /// An extra, provider-specific window (e.g. Claude's per-model weekly limits).
@@ -137,8 +165,16 @@ protocol UsageProviderClient {
     /// it's missing or stale. Runs off the main actor and may do file IO.
     static func cachedSnapshot() -> ProviderSnapshot?
     static func fetch() throws -> ProviderSnapshot
+    /// An opaque, cheap-to-read identity for the account currently signed in,
+    /// when the provider can tell without spending a request. The store keys
+    /// its rate-limit back-off on this: signing in as somebody else means the
+    /// previous account's cooldown no longer applies, and holding it against
+    /// the new one would hide fresh data for up to an hour. Nil means "can't
+    /// tell", which the store treats as unchanged.
+    static func accountIdentity() -> String?
 }
 
 extension UsageProviderClient {
     static func cachedSnapshot() -> ProviderSnapshot? { nil }
+    static func accountIdentity() -> String? { nil }
 }

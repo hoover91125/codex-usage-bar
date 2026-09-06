@@ -15,6 +15,20 @@ enum ClaudeCodeUsageCache {
         let fetchedAt: Date
     }
 
+    /// The account Claude Code is currently signed in as, straight out of its
+    /// config file. Free to read and not a secret — it's an opaque uuid, not a
+    /// token — which is what makes it usable as the store's "did the account
+    /// change" signal without ever touching the Keychain.
+    static func accountIdentity() -> String? {
+        guard let data = FileManager.default.contents(atPath: configFilePath()),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = json["oauthAccount"] as? [String: Any],
+              let uuid = account["accountUuid"] as? String, !uuid.isEmpty else {
+            return nil
+        }
+        return uuid
+    }
+
     static func configFilePath() -> String {
         let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 }
         return (configDir ?? NSHomeDirectory()) + "/.claude.json"

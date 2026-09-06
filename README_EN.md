@@ -17,9 +17,10 @@
 - Codex and Claude side by side: Claude usage comes from the Claude Code login on this Mac and includes per-model weekly windows such as Opus and Sonnet.
 - Uses a native macOS menu for progress, reset times, credits, and resets.
 - Configurable menu bar icon, icon size, and text size.
-- Percentages shown as remaining or as used, with configurable orange and red alert thresholds for the menu and Touch Bar.
+- Percentages shown as remaining or as used, with configurable alert thresholds. A window turns orange, then red at 30% and 10% remaining by default, in the menu bar title, the menu and on the Touch Bar.
+- A pace mark on each progress bar shows where an even burn would have reached by now. A window spending noticeably faster than that also gets a rate badge.
 - Follows the system language by default, with in-app switching between Simplified Chinese, Traditional Chinese, English, Japanese, Korean, and Spanish.
-- Optional launch at login. Codex refreshes every minute; Claude is requested at most every five minutes.
+- Optional launch at login. Codex refreshes every minute; Claude is requested at most every five minutes, doubled on battery and paused while the display sleeps.
 - Touch Bar progress, percentages, reset times, and manual refresh, for one provider or both.
 - Optional automatic Touch Bar presentation while Codex is frontmost.
 - No third-party dependencies and no separate API key.
@@ -75,7 +76,9 @@ Claude usage comes from the Claude Code login on this Mac:
 1. The app first reads the usage that Claude Code itself caches in its config file `~/.claude.json` (`cachedUsageUtilization`), read-only. While that copy is less than five minutes old, no request is made at all.
 2. When it is stale, the app reads Claude Code's access token from the macOS Keychain item `Claude Code-credentials` (or `~/.claude/.credentials.json`) and sends one read-only request to `https://api.anthropic.com/api/oauth/usage`. The token stays in memory only for that request; it is never written to disk or logged, and the refresh token is never read.
 
-The endpoint is rate limited per account, and the budget is shared with Claude Code itself and any other tool that polls it. After an HTTP 429 the app waits five minutes, doubling on each consecutive 429 up to one hour.
+The endpoint is rate limited per account, and the budget is shared with Claude Code itself and any other tool that polls it. After an HTTP 429 the app waits five minutes, doubling on each consecutive 429 up to one hour. Automatic refreshes skip Claude for that whole window; the menu's Refresh button may still try once a minute. Signing in as a different Claude account clears the back-off, since the budget belongs to the account.
+
+Settings has a sidebar of five panes: Services, Display, Menu Bar, Touch Bar and General. The Display pane switches every percentage between remaining and used, turns the pace mark on or off, and sets the two alert thresholds above a color strip that shows what each band looks like as the sliders move.
 
 The app contains no telemetry or third-party analytics. See [docs/PRIVACY.md](docs/PRIVACY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

@@ -25,6 +25,10 @@ enum ClaudeUsageClient: UsageProviderClient {
         return try? parse(entry.utilization, plan: nil, fetchedAt: entry.fetchedAt)
     }
 
+    static func accountIdentity() -> String? {
+        ClaudeCodeUsageCache.accountIdentity()
+    }
+
     static func fetch() throws -> ProviderSnapshot {
         let credentials = try ClaudeCredentialStore.load()
         if credentials.isExpired {
@@ -145,7 +149,10 @@ enum ClaudeUsageClient: UsageProviderClient {
             secondary: secondary,
             extras: extras,
             plan: plan,
-            credits: creditInfo(from: json["extra_usage"] as? [String: Any]),
+            credits: creditInfo(
+                spend: json["spend"] as? [String: Any],
+                extraUsage: json["extra_usage"] as? [String: Any]
+            ),
             fetchedAt: fetchedAt
         )
     }
@@ -159,7 +166,43 @@ enum ClaudeUsageClient: UsageProviderClient {
         return RateWindow(usedPercent: clampedPercent(utilization), durationMinutes: durationMinutes, resetsAt: resetsAt)
     }
 
-    private static func creditInfo(from extraUsage: [String: Any]?) -> CreditInfo? {
+    /// Extra-usage spend, from whichever shape the response carries. Newer
+    /// responses report it as `spend.{used,limit,enabled}` where each amount
+    /// is a money object in minor units; older ones used
+    /// `extra_usage.{used_credits,monthly_limit}` as plain numbers. Both are
+    /// still in the wild depending on the account, so the newer shape is tried
+    /// first and the older one is the fallback rather than a replacement.
+    private static func creditInfo(spend: [String: Any]?, extraUsage: [String: Any]?) -> CreditInfo? {
+        if let spend, let info = creditInfoFromSpend(spend) { return info }
+        return creditInfoFromExtraUsage(extraUsage)
+    }
+
+    private static func creditInfoFromSpend(_ spend: [String: Any]) -> CreditInfo? {
+        let isEnabled = (spend["enabled"] as? Bool) ?? (spend["is_enabled"] as? Bool) ?? false
+        let used = money(spend["used"])
+        let limit = money(spend["limit"])
+        // An account with extra usage switched off still reports a `used` of
+        // zero. Reading that as a balance printed "0 USD" on every such
+        // account, which says nothing; treat it as "no extra usage here" and
+        // let the older field have its turn.
+        guard isEnabled || limit != nil || (used?.amount ?? 0) > 0 else { return nil }
+
+        var balance: String?
+        if let used {
+            let currency = limit?.currency.isEmpty == false ? limit!.currency : used.currency
+            if let limit {
+                balance = join(formatCredits(used.amount), formatCredits(limit.amount), currency: currency)
+            } else {
+                balance = currency.isEmpty
+                    ? formatCredits(used.amount)
+                    : "\(formatCredits(used.amount)) \(currency)"
+            }
+        }
+
+        return CreditInfo(balance: balance, unlimited: limit == nil && isEnabled, resetCount: 0)
+    }
+
+    private static func creditInfoFromExtraUsage(_ extraUsage: [String: Any]?) -> CreditInfo? {
         guard let extraUsage else { return nil }
         let isEnabled = extraUsage["is_enabled"] as? Bool ?? false
         let monthlyLimit = numberValue(extraUsage["monthly_limit"])
@@ -168,9 +211,7 @@ enum ClaudeUsageClient: UsageProviderClient {
 
         var balance: String?
         if let usedCredits, let monthlyLimit {
-            let used = formatCredits(usedCredits)
-            let limit = formatCredits(monthlyLimit)
-            balance = currency.isEmpty ? "\(used) / \(limit)" : "\(used) / \(limit) \(currency)"
+            balance = join(formatCredits(usedCredits), formatCredits(monthlyLimit), currency: currency)
         }
 
         return CreditInfo(
@@ -180,8 +221,30 @@ enum ClaudeUsageClient: UsageProviderClient {
         )
     }
 
+    private struct Money {
+        let amount: Double
+        let currency: String
+    }
+
+    /// `{"amount_minor": 541, "currency": "USD", "exponent": 2}` → 5.41 USD.
+    /// A missing exponent means the usual two decimal places; a plain number
+    /// in the field is taken at face value, since some accounts still send
+    /// one there.
+    private static func money(_ value: Any?) -> Money? {
+        if let plain = numberValue(value) { return Money(amount: plain, currency: "") }
+        guard let object = value as? [String: Any] else { return nil }
+        guard let minor = numberValue(object["amount_minor"]) ?? numberValue(object["amount"]) else { return nil }
+        let exponent = numberValue(object["exponent"]) ?? 2
+        let currency = object["currency"] as? String ?? ""
+        return Money(amount: minor / pow(10, exponent), currency: currency)
+    }
+
+    private static func join(_ used: String, _ limit: String, currency: String) -> String {
+        currency.isEmpty ? "\(used) / \(limit)" : "\(used) / \(limit) \(currency)"
+    }
+
     private static func formatCredits(_ value: Double) -> String {
-        value.rounded() == value ? String(format: "%.0f", value) : String(format: "%.1f", value)
+        value.rounded() == value ? String(format: "%.0f", value) : String(format: "%.2f", value)
     }
 
     private static func numberValue(_ value: Any?) -> Double? {

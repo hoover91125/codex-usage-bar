@@ -1,6 +1,8 @@
 import AppKit
 import Combine
+import IOKit.ps
 import ServiceManagement
+import SwiftUI
 
 func usageProviderClient(for provider: UsageProvider) -> any UsageProviderClient.Type {
     switch provider {
@@ -23,8 +25,9 @@ enum UsageDisplayMode: String, CaseIterable, Identifiable, Sendable {
 
 /// How far a window's remaining budget has fallen relative to the two
 /// user-set thresholds (`warningRemainingPercent` / `criticalRemainingPercent`).
-/// The views pick the colors; this is the one shared rule, so the popover
-/// and the Touch Bar can't disagree about when to change.
+/// This is the one shared rule, so the menu bar, the popover and the Touch Bar
+/// can't disagree about when a window changes color; the colors themselves
+/// live in `UsageAlertLevel.nsColor`.
 enum UsageAlertLevel: Sendable {
     case normal
     case warning
@@ -84,6 +87,17 @@ final class UsageStore: ObservableObject {
     @Published var usageDisplayMode: UsageDisplayMode {
         didSet { UserDefaults.standard.set(usageDisplayMode.rawValue, forKey: "usageDisplayMode") }
     }
+    /// Whether the menu bar title takes the alert color once a window falls
+    /// past a threshold. Off leaves the title in the system's own color, which
+    /// is what it did before and what keeps it dimming with the rest of an
+    /// inactive menu bar.
+    @Published var menuBarTintEnabled: Bool {
+        didSet { UserDefaults.standard.set(menuBarTintEnabled, forKey: "menuBarTintEnabled") }
+    }
+    /// Whether progress bars draw the even-burn pace mark.
+    @Published var showPaceMarker: Bool {
+        didSet { UserDefaults.standard.set(showPaceMarker, forKey: "showPaceMarker") }
+    }
     /// Alert thresholds, always stored as *remaining* percent no matter what
     /// `usageDisplayMode` shows: a window at or below `warning` remaining is
     /// orange, at or below `critical` remaining is red. The settings UI
@@ -93,7 +107,7 @@ final class UsageStore: ObservableObject {
     /// other property's `didSet`, which then finds nothing left to fix.
     @Published var warningRemainingPercent: Int {
         didSet {
-            UserDefaults.standard.set(warningRemainingPercent, forKey: "alertWarningRemainingPercent")
+            UserDefaults.standard.set(warningRemainingPercent, forKey: Self.warningKey)
             if criticalRemainingPercent > warningRemainingPercent {
                 criticalRemainingPercent = warningRemainingPercent
             }
@@ -101,11 +115,40 @@ final class UsageStore: ObservableObject {
     }
     @Published var criticalRemainingPercent: Int {
         didSet {
-            UserDefaults.standard.set(criticalRemainingPercent, forKey: "alertCriticalRemainingPercent")
+            UserDefaults.standard.set(criticalRemainingPercent, forKey: Self.criticalKey)
             if warningRemainingPercent < criticalRemainingPercent {
                 warningRemainingPercent = criticalRemainingPercent
             }
         }
+    }
+
+    private static let warningKey = "alertWarningRemainingPercent"
+    private static let criticalKey = "alertCriticalRemainingPercent"
+    private static let accountIdentityKey = "providerAccountIdentity"
+
+    private static let defaultWarning = 30
+    private static let defaultCritical = 10
+    // Only ever written by a build that briefly had a third, yellow band. It
+    // is removed on load so a stale value can't come back if that band is ever
+    // reintroduced.
+    private static let retiredCautionKey = "alertCautionRemainingPercent"
+
+    private static func clampPercent(_ value: Int) -> Int { max(0, min(100, value)) }
+
+    /// When the automatic refresh will next try `provider`, if it is currently
+    /// backing off from a rate limit. Nil once the deadline has passed.
+    func cooldownEnds(for provider: UsageProvider) -> Date? {
+        guard let date = cooldownUntil[provider], date > Date() else { return nil }
+        return date
+    }
+
+    /// How fast `window` is being spent relative to how fast it refills, but
+    /// only while that is bad news. Being *under* pace needs no badge — the
+    /// bar already sits behind its pace mark — and flagging it put a flame
+    /// beside a window that was doing fine.
+    func paceText(_ window: RateWindow) -> String? {
+        guard let ratio = window.paceRatio(), ratio >= 1.15 else { return nil }
+        return String(format: "%.1f×", locale: appLanguage.locale, ratio)
     }
 
     // Populated off the main actor at the start of every refresh cycle.
@@ -131,6 +174,7 @@ final class UsageStore: ObservableObject {
     @Published var settingsErrorMessage: String?
 
     private var refreshTask: Task<Void, Never>?
+    private var lifetimeSubscriptions = Set<AnyCancellable>()
     private var pendingRefresh = false
     private var pendingForce = false
 
@@ -153,12 +197,30 @@ final class UsageStore: ObservableObject {
     private var lastAttempt: [UsageProvider: Date] = [:]
 
     // A 429 is a hard "back off" signal from the server: the provider is
-    // skipped until this deadline even under a forced refresh.
-    private var cooldownUntil: [UsageProvider: Date] = [:]
+    // skipped until this deadline by the timer, though a person can still
+    // force one attempt through. Published so the popover can say when the
+    // next automatic try is due instead of just showing a stale number.
+    @Published private(set) var cooldownUntil: [UsageProvider: Date] = [:]
 
     // Consecutive 429s per provider, so each cooldown can be longer than the
     // last while the server keeps refusing. Cleared by the next success.
     private var rateLimitStreak: [UsageProvider: Int] = [:]
+
+    // The account each provider was signed in as when its throttle state was
+    // last written. A different account has its own rate-limit budget, so
+    // holding the old one's cooldown against it would hide fresh data for up
+    // to an hour after a sign-in. Persisted alongside the rest of the cache.
+    private var lastAccountIdentity: [String: String] = [:]
+
+    // Whether this Mac is running on battery, sampled once per refresh cycle
+    // rather than per call: `minimumRefreshInterval` is on the hot path and
+    // IOKit power-source lookups allocate.
+    @Published private(set) var onBatteryPower = false
+
+    // Set while the display is asleep. Nothing on screen can be read then and
+    // the machine is usually idle, so the cycle is skipped outright instead of
+    // spending a request against a shared budget nobody is watching.
+    private var displaysAsleep = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -186,14 +248,18 @@ final class UsageStore: ObservableObject {
         providerEnabledClaude = defaults.object(forKey: "providerEnabledClaude") as? Bool ?? true
         menuBarSource = defaults.string(forKey: "menuBarSource").flatMap(UsageProvider.init(rawValue:)) ?? .codex
         usageDisplayMode = defaults.string(forKey: "usageDisplayMode").flatMap(UsageDisplayMode.init(rawValue:)) ?? .remaining
-        // The defaults are the thresholds that were hardcoded before these
-        // were settings. Stored values are clamped and re-ordered on the way
-        // in so a hand-edited plist can't put red above orange.
-        let storedWarning = defaults.object(forKey: "alertWarningRemainingPercent") as? Int ?? 25
-        let storedCritical = defaults.object(forKey: "alertCriticalRemainingPercent") as? Int ?? 10
-        let warning = max(0, min(100, storedWarning))
+        menuBarTintEnabled = defaults.object(forKey: "menuBarTintEnabled") as? Bool ?? true
+        showPaceMarker = defaults.object(forKey: "showPaceMarker") as? Bool ?? true
+        // Two thresholds, clamped and re-ordered on the way in so a
+        // hand-edited plist can't put red above orange.
+        defaults.removeObject(forKey: Self.retiredCautionKey)
+        let storedWarning = defaults.object(forKey: Self.warningKey) as? Int ?? Self.defaultWarning
+        let storedCritical = defaults.object(forKey: Self.criticalKey) as? Int ?? Self.defaultCritical
+        let warning = Self.clampPercent(storedWarning)
         warningRemainingPercent = warning
         criticalRemainingPercent = max(0, min(warning, storedCritical))
+
+        lastAccountIdentity = defaults.dictionary(forKey: Self.accountIdentityKey) as? [String: String] ?? [:]
 
         // Before the first `refresh()`, so a relaunch inside a provider's
         // minimum interval shows the cached numbers and skips the request.
@@ -210,9 +276,33 @@ final class UsageStore: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
                 guard !Task.isCancelled, let self else { return }
+                guard !self.displaysAsleep else { continue }
                 self.refresh()
             }
         }
+
+        observeDisplaySleep()
+    }
+
+    /// Display sleep bounds the polling loop the way ClaudeBar's does: no
+    /// requests while the screen is off, one refresh on wake so the first
+    /// glance after opening the lid isn't showing an hour-old number. System
+    /// sleep is handled separately in `AppDelegate` — the machine can sleep
+    /// without the display having slept first, and vice versa.
+    private func observeDisplaySleep() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.publisher(for: NSWorkspace.screensDidSleepNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.displaysAsleep = true }
+            .store(in: &lifetimeSubscriptions)
+        center.publisher(for: NSWorkspace.screensDidWakeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.displaysAsleep = false
+                self.refresh()
+            }
+            .store(in: &lifetimeSubscriptions)
     }
 
     private func loadCache() {
@@ -302,9 +392,20 @@ final class UsageStore: ObservableObject {
         return otherErrors[provider]
     }
 
+    /// The provider whose numbers the menu bar prints: the chosen one while
+    /// it is enabled and installed, otherwise whichever one is.
+    var menuBarProvider: UsageProvider? {
+        enabledProviders.contains(menuBarSource) ? menuBarSource : enabledProviders.first
+    }
+
+    /// The worst band across the windows the menu bar is showing, so the title
+    /// can take that color.
+    var menuTitleAlertLevel: UsageAlertLevel {
+        alertLevel(for: menuBarProvider.flatMap { snapshot(for: $0) })
+    }
+
     var menuTitle: String {
-        let provider = enabledProviders.contains(menuBarSource) ? menuBarSource : enabledProviders.first
-        guard let provider, let snapshot = snapshot(for: provider) else {
+        guard let provider = menuBarProvider, let snapshot = snapshot(for: provider) else {
             return isLoading ? "…" : "!"
         }
         let fiveHour = snapshot.primary.map { "\(displayPercent($0))%" } ?? "–"
@@ -336,6 +437,24 @@ final class UsageStore: ObservableObject {
         return .normal
     }
 
+    /// The worst level across a provider's two headline windows — what the
+    /// menu bar tints and what the popover's status dot shows.
+    func alertLevel(for snapshot: ProviderSnapshot?) -> UsageAlertLevel {
+        guard let snapshot else { return .normal }
+        let levels = [snapshot.primary, snapshot.secondary].compactMap { $0 }.map(alertLevel(for:))
+        if levels.contains(.critical) { return .critical }
+        if levels.contains(.warning) { return .warning }
+        return .normal
+    }
+
+    /// Where the pace mark sits on `window`'s bar, in the same terms the bar
+    /// is drawn in — so in `.used` mode it tracks the fill and in `.remaining`
+    /// mode it mirrors it. Nil when the window's length is unknown.
+    func paceMarkerPercent(_ window: RateWindow) -> Int? {
+        guard showPaceMarker, let expected = window.expectedUsedPercent() else { return nil }
+        return usageDisplayMode == .used ? expected : 100 - expected
+    }
+
     func tr(_ key: String) -> String {
         L10n.string(key, language: appLanguage)
     }
@@ -346,6 +465,27 @@ final class UsageStore: ObservableObject {
 
     func formatDate(_ date: Date, includeDate: Bool = true) -> String {
         L10n.formatDate(date, language: appLanguage, includeDate: includeDate)
+    }
+
+    /// "Resets in 3h 12m · 18:30" — the countdown people actually read, with
+    /// the wall-clock time kept beside it for anyone planning around it. The
+    /// day is printed only when the reset is far enough out that the time
+    /// alone would be ambiguous, so the 5-hour line stays short.
+    func resetCaption(for window: RateWindow) -> String? {
+        guard let resetsAt = window.resetsAt else { return nil }
+        let includeDate = resetsAt.timeIntervalSinceNow > 20 * 3600
+        let absolute = formatDate(resetsAt, includeDate: includeDate)
+        guard let relative = L10n.formatRelative(resetsAt, language: appLanguage) else {
+            return tr("reset_at", absolute)
+        }
+        return "\(tr("reset_in", relative)) · \(absolute)"
+    }
+
+    /// The alert color for a window, or a muted tone when there is no window
+    /// to color. One helper so every surface asks the same question.
+    func alertColor(for window: RateWindow?) -> Color {
+        guard let window else { return .secondary }
+        return alertLevel(for: window).color
     }
 
     /// Refreshes if the oldest enabled provider's snapshot is older than
@@ -371,10 +511,16 @@ final class UsageStore: ObservableObject {
     /// 429 — another client may have spent the budget — which is why the
     /// store prefers `cachedSnapshot()` and backs off harder on each 429.
     func minimumRefreshInterval(for provider: UsageProvider) -> TimeInterval {
+        let base: TimeInterval
         switch provider {
-        case .codex: return 0
-        case .claude: return 300
+        case .codex: base = 0
+        case .claude: base = 300
         }
+        // On battery the interval doubles, as ClaudeBar's monitor does. A
+        // local subprocess (Codex) has nothing to save, so only the networked
+        // provider is stretched.
+        guard base > 0, onBatteryPower else { return base }
+        return base * 2
     }
 
     /// The floor a *forced* refresh still respects. `force` exists so the
@@ -393,10 +539,17 @@ final class UsageStore: ObservableObject {
     /// `Retry-After` (or a bad cached value) can't wedge a provider.
     private var maxBackoff: TimeInterval { 3600 }
 
-    /// `force: true` bypasses the per-provider throttle (but never the 429
-    /// cooldown) — only the popover's manual Refresh button does this. The
-    /// timer, the wake-from-sleep handler, and `refreshIfStale` all call the
-    /// non-forced form.
+    /// `force: true` means "a person asked for this", and only the popover's
+    /// Refresh button passes it. The timer, the wake handlers and
+    /// `refreshIfStale` all call the non-forced form.
+    ///
+    /// A forced refresh shortens the per-provider throttle *and* is allowed
+    /// through a 429 cooldown, which is what CodexBar does: the cooldown
+    /// exists to stop unattended polling from spending a shared budget, and a
+    /// person standing at the menu watching a stale number is the one case
+    /// where spending one request is worth it. `forcedMinimumRefreshInterval`
+    /// still caps that at one attempt a minute, so holding the button down
+    /// can't turn into a burst.
     func refresh(force: Bool = false) {
         // A request arriving mid-flight is queued rather than dropped, so a
         // wake or timer tick during a slow fetch still produces fresh data.
@@ -416,14 +569,16 @@ final class UsageStore: ObservableObject {
     }
 
     private func runRefreshCycle(force: Bool) async {
+        onBatteryPower = await Task.detached(priority: .utility) { UsageStore.readIsOnBattery() }.value
         await refreshInstalledProviders()
+        await resetThrottleForChangedAccounts()
         await adoptLocalSnapshots()
 
         let now = Date()
         var providersToFetch: [UsageProvider] = []
         for provider in enabledProviders {
-            // A 429 cooldown is a hard skip, even under force.
-            if let cooldown = cooldownUntil[provider], cooldown > now { continue }
+            // A 429 cooldown skips the provider unless a person asked.
+            if let cooldown = cooldownUntil[provider], cooldown > now, !force { continue }
             let floor = force
                 ? forcedMinimumRefreshInterval(for: provider)
                 : minimumRefreshInterval(for: provider)
@@ -511,6 +666,67 @@ final class UsageStore: ObservableObject {
         let base = max(minimumRefreshInterval(for: provider), 60)
         let doublings = min(streak - 1, 8)
         return min(base * pow(2, Double(doublings)), maxBackoff)
+    }
+
+    /// Drops the rate-limit back-off for any provider whose signed-in account
+    /// has changed since it was recorded. The endpoint's budget is per
+    /// account, so a cooldown earned by the previous login says nothing about
+    /// the new one — CodexBar gets the same effect by keying its cooldown on a
+    /// hash of the access token; this reads the account id the provider's own
+    /// tooling already wrote to disk, which costs no request and never handles
+    /// the secret.
+    private func resetThrottleForChangedAccounts() async {
+        let providers = enabledProviders
+        guard !providers.isEmpty else { return }
+        let identities = await Task.detached(priority: .utility) {
+            var found: [UsageProvider: String] = [:]
+            for provider in providers {
+                if let identity = usageProviderClient(for: provider).accountIdentity() {
+                    found[provider] = identity
+                }
+            }
+            return found
+        }.value
+
+        var changed = false
+        for (provider, identity) in identities {
+            let key = provider.rawValue
+            // A provider that can't report an identity, or one seen for the
+            // first time, is recorded without clearing anything — only an
+            // actual change from a known previous value is a sign-in.
+            if let previous = lastAccountIdentity[key], previous != identity {
+                cooldownUntil[provider] = nil
+                rateLimitStreak[provider] = nil
+                lastAttempt[provider] = nil
+                errors[provider] = nil
+            }
+            if lastAccountIdentity[key] != identity {
+                lastAccountIdentity[key] = identity
+                changed = true
+            }
+        }
+        if changed {
+            UserDefaults.standard.set(lastAccountIdentity, forKey: Self.accountIdentityKey)
+        }
+    }
+
+    /// True while the Mac is drawing from the battery. Reads the IOKit power
+    /// sources directly rather than watching for notifications: this is
+    /// sampled once a minute at most, and a missing or unreadable source
+    /// (a desktop Mac) reads as "on wall power", which is the conservative
+    /// answer — it keeps the normal refresh cadence.
+    nonisolated private static func readIsOnBattery() -> Bool {
+        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else {
+            return false
+        }
+        for source in sources {
+            guard let description = IOPSGetPowerSourceDescription(blob, source)?
+                .takeUnretainedValue() as? [String: Any],
+                let state = description[kIOPSPowerSourceStateKey] as? String else { continue }
+            if state == kIOPSBatteryPowerValue { return true }
+        }
+        return false
     }
 
     /// Free data first. A provider may keep its own copy of the usage on disk

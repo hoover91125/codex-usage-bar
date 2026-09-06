@@ -209,6 +209,12 @@ final class TouchBarProgressView: NSView {
     var value: Double = 0 {
         didSet { needsDisplay = true }
     }
+    /// Where an even burn would have reached by now, in the same terms as
+    /// `value`. Nil hides the mark — for windows whose length the provider
+    /// doesn't state, and when the user has turned it off.
+    var paceValue: Double? {
+        didSet { needsDisplay = true }
+    }
     var tintColor: NSColor = .controlAccentColor {
         didSet { needsDisplay = true }
     }
@@ -223,10 +229,26 @@ final class TouchBarProgressView: NSView {
         NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
 
         let fraction = max(0, min(1, value / 100))
-        guard fraction > 0 else { return }
-        let fillRect = NSRect(x: rect.minX, y: rect.minY, width: rect.width * fraction, height: rect.height)
-        tintColor.setFill()
-        NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).fill()
+        if fraction > 0 {
+            let fillRect = NSRect(x: rect.minX, y: rect.minY, width: rect.width * fraction, height: rect.height)
+            tintColor.setFill()
+            NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius).fill()
+        }
+
+        // Drawn over the fill so it stays visible on the filled side of the
+        // bar, which is where it matters — the mark only says anything once
+        // the fill has passed it (or fallen behind it).
+        guard let paceValue else { return }
+        let position = max(0, min(1, paceValue / 100))
+        let markWidth: CGFloat = 1
+        let markRect = NSRect(
+            x: rect.minX + (rect.width - markWidth) * position,
+            y: bounds.minY,
+            width: markWidth,
+            height: bounds.height
+        )
+        NSColor.labelColor.withAlphaComponent(0.55).setFill()
+        markRect.fill()
     }
 }
 
@@ -436,13 +458,14 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
 
         // Which number each item prints and when it changes color — neither
         // touches the snapshots, so they need their own trigger.
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest4(
             store.$usageDisplayMode,
             store.$warningRemainingPercent,
-            store.$criticalRemainingPercent
+            store.$criticalRemainingPercent,
+            store.$showPaceMarker
         )
         .receive(on: RunLoop.main)
-        .sink { [weak self] _, _, _ in self?.updateItems() }
+        .sink { [weak self] _, _, _, _ in self?.updateItems() }
         .store(in: &subscriptions)
 
         // `effectiveTouchBarSource`'s fallback (mirroring `menuTitle`'s) reads
@@ -1071,18 +1094,15 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
             label?.stringValue = "\(prefix) –"
             label?.textColor = .secondaryLabelColor
             progress?.value = 0
+            progress?.paceValue = nil
             return
         }
         let percent = store.displayPercent(window)
-        let color: NSColor
-        switch store.alertLevel(for: window) {
-        case .critical: color = .systemRed
-        case .warning: color = .systemOrange
-        case .normal: color = .controlAccentColor
-        }
+        let color = store.alertLevel(for: window).nsColor
         label?.stringValue = "\(prefix) \(percent)%"
         label?.textColor = color
         progress?.value = Double(percent)
+        progress?.paceValue = store.paceMarkerPercent(window).map(Double.init)
         progress?.tintColor = color
     }
 

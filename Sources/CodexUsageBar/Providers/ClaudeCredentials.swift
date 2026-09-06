@@ -1,5 +1,7 @@
 import Foundation
 import CryptoKit
+import LocalAuthentication
+import Security
 
 /// The decoded `claudeAiOauth` blob. Never log or expose `accessToken`
 /// outside of the single HTTPS request that uses it. `refreshToken` is
@@ -25,6 +27,58 @@ enum ClaudeCredentialStore {
         return FileManager.default.fileExists(atPath: credentialsFilePath())
     }
 
+    /// The Security framework query shared by the two Keychain readers below.
+    /// The `LAContext` with `interactionNotAllowed` is what makes both silent:
+    /// an item this app is not on the ACL of comes back as
+    /// `errSecInteractionNotAllowed` instead of putting an authorization
+    /// dialog on screen behind the user's back. (The older
+    /// `kSecUseAuthenticationUIFail` spelling does the same thing and is what
+    /// CodexBar uses, but it is deprecated in favor of exactly this.)
+    private static func keychainQuery(account: String, service: String, returnData: Bool) -> [String: Any] {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            returnData ? kSecReturnData as String : kSecReturnAttributes as String: true,
+            kSecUseAuthenticationContext as String: context
+        ]
+    }
+
+    /// Reads the item through the Security framework. This is the *fallback*,
+    /// not the preferred path, which is the opposite of what it looks like:
+    /// measured on this machine the `security` subprocess below returns the
+    /// same 566 bytes in 10–20 ms every time, while this call took 5.5–6.7 s
+    /// on its first uses (it goes through SecurityAgent to evaluate the item's
+    /// ACL) before settling to ~9 ms once cached. `/usr/bin/security` is
+    /// Apple-signed and already trusted for this item, so it skips all of
+    /// that. What this call is good for is the case the subprocess can't
+    /// cover — `/usr/bin/security` missing or refusing — so it runs after.
+    private static func readKeychainDirect(account: String, service: String) -> Data? {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(
+            keychainQuery(account: account, service: service, returnData: true) as CFDictionary,
+            &result
+        )
+        guard status == errSecSuccess, let data = result as? Data, !data.isEmpty else { return nil }
+        return data
+    }
+
+    /// Existence check that returns attributes rather than the secret, so
+    /// there is no ACL decision to make and it resolves in a few milliseconds
+    /// — genuinely better than spawning `security` for this, unlike the read
+    /// above, which is why this one does go first.
+    private static func keychainEntryExistsDirect(account: String, service: String) -> Bool {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(
+            keychainQuery(account: account, service: service, returnData: false) as CFDictionary,
+            &result
+        )
+        return status == errSecSuccess
+    }
+
     static func load() throws -> ClaudeCredentials {
         guard let data = try locate() else {
             throw UsageClientError.claudeCredentialsNotFound
@@ -33,8 +87,15 @@ enum ClaudeCredentialStore {
     }
 
     private static func locate() throws -> Data? {
-        for service in candidateServiceNames() {
-            if let data = readKeychain(account: account(), service: service) {
+        let account = account()
+        let services = candidateServiceNames()
+        for service in services {
+            if let data = readKeychain(account: account, service: service) {
+                return data
+            }
+        }
+        for service in services {
+            if let data = readKeychainDirect(account: account, service: service) {
                 return data
             }
         }
@@ -65,6 +126,7 @@ enum ClaudeCredentialStore {
     /// item exists and prints only attributes (no secret), so this never pops
     /// the authorization dialog that reading the password would.
     private static func keychainEntryExists(account: String, service: String) -> Bool {
+        if keychainEntryExistsDirect(account: account, service: service) { return true }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         process.arguments = ["find-generic-password", "-a", account, "-s", service]

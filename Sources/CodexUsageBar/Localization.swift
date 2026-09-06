@@ -59,6 +59,34 @@ enum L10n {
         String(format: string(key, language: language), locale: language.locale, arguments: arguments)
     }
 
+    /// A compact "time left" string — "3h 12m", "4d 6h", "45m" — in
+    /// `language`'s own unit abbreviations. Nil once the moment has passed, so
+    /// callers fall back to the absolute time rather than printing "0m".
+    /// `DateComponentsFormatter` is not used: its `.abbreviated` style spells
+    /// the units out in CJK ("3小时12分钟"), which is twice the width the
+    /// popover captions and the Touch Bar have to spare.
+    static func formatRelative(_ date: Date, language: AppLanguage, now: Date = Date()) -> String? {
+        let seconds = date.timeIntervalSince(now)
+        guard seconds > 0 else { return nil }
+        let day = string("dur_day", language: language)
+        let hour = string("dur_hour", language: language)
+        let minute = string("dur_minute", language: language)
+        let join = string("dur_join", language: language)
+
+        let totalMinutes = Int(seconds / 60)
+        if totalMinutes < 1 { return "<1\(minute)" }
+        let days = totalMinutes / 1440
+        let hours = (totalMinutes % 1440) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 {
+            return hours > 0 ? "\(days)\(day)\(join)\(hours)\(hour)" : "\(days)\(day)"
+        }
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)\(hour)\(join)\(minutes)\(minute)" : "\(hours)\(hour)"
+        }
+        return "\(minutes)\(minute)"
+    }
+
     /// Locale-aware "H:mm" (or "M/d H:mm" with `includeDate`) in `language`'s
     /// locale. `UsageStore.formatDate` is the instance-level form; this one
     /// exists so the Touch Bar can size its items against every language's
@@ -79,7 +107,7 @@ enum L10n {
             "reset_count": "%d 次重置", "refresh": "刷新", "official_usage": "官方 Usage",
             "section_display": "显示", "display_mode": "百分比显示", "display_mode_remaining": "剩余量", "display_mode_used": "使用量",
             "used": "已使用 %d%%", "alert_warning": "橙色警示", "alert_critical": "红色警示",
-            "alert_description": "达到阈值时，菜单窗口与 Touch Bar 的百分比和进度条会变色。",
+            "alert_description": "达到门槛时，菜单栏文字、菜单窗口与 Touch Bar 的百分比和进度条会依序变成橙、红。",
             "section_language": "语言", "language": "应用语言", "section_menu_bar": "菜单栏", "icon": "图标",
             "icon_size": "图标大小", "text_size": "文字字号", "section_general": "通用",
             "section_services": "服务", "service_missing_codex": "找不到 Codex CLI。",
@@ -106,7 +134,17 @@ enum L10n {
             "icon_gauge": "仪表盘", "icon_simple_gauge": "简洁仪表", "icon_speedometer": "速度表", "icon_bar_chart": "柱状图",
             "icon_trend": "趋势图", "icon_percent": "百分比", "icon_bolt": "闪电", "icon_flame": "火焰",
             "icon_sparkles": "星光", "icon_terminal": "终端", "icon_command": "Command", "icon_cpu": "处理器",
-            "icon_chip": "芯片", "icon_timer": "计时器", "icon_refresh_clock": "刷新时钟", "icon_waveform": "状态波形", "icon_hidden": "隐藏图标"
+            "icon_chip": "芯片", "icon_timer": "计时器", "icon_refresh_clock": "刷新时钟", "icon_waveform": "状态波形", "icon_hidden": "隐藏图标",
+            "alert_normal": "正常", "section_alerts": "警示门槛",
+            "dur_day": "天", "dur_hour": "时", "dur_minute": "分", "dur_join": "",
+            "reset_in": "%@后重置", "retry_after": "%@ 后重试", "section_models": "各模型每周",
+            "pace_help": "进度条上的细线是按时间平均消耗应到的位置；越过它表示消耗偏快。",
+            "tab_services": "服务", "tab_display": "显示", "tab_menu_bar": "菜单栏",
+            "tab_touch_bar": "Touch Bar", "tab_general": "通用",
+            "battery_note": "使用电池时 Claude 的刷新间隔加倍；显示器休眠时暂停刷新。",
+            "threshold_preview": "预览", "menu_bar_tint": "低于门槛时为菜单栏文字着色",
+            "show_pace_marker": "在进度条上显示速度参考线", "project_page": "项目页面",
+            "on_battery": "电池供电"
         ],
         .zhHant: [
             "system_default": "跟隨系統", "settings": "設定", "quit": "結束",
@@ -116,7 +154,7 @@ enum L10n {
             "reset_count": "%d 次重置", "refresh": "重新整理", "official_usage": "官方 Usage",
             "section_display": "顯示", "display_mode": "百分比顯示", "display_mode_remaining": "剩餘量", "display_mode_used": "使用量",
             "used": "已使用 %d%%", "alert_warning": "橘色警示", "alert_critical": "紅色警示",
-            "alert_description": "達到門檻時，選單視窗與 Touch Bar 的百分比和進度條會變色。",
+            "alert_description": "達到門檻時，選單列文字、選單視窗與 Touch Bar 的百分比和進度條會依序變成橘、紅。",
             "section_language": "語言", "language": "應用程式語言", "section_menu_bar": "選單列", "icon": "圖示",
             "icon_size": "圖示大小", "text_size": "文字大小", "section_general": "一般",
             "section_services": "服務", "service_missing_codex": "找不到 Codex CLI。",
@@ -143,7 +181,17 @@ enum L10n {
             "icon_gauge": "儀表板", "icon_simple_gauge": "簡潔儀表", "icon_speedometer": "速度表", "icon_bar_chart": "長條圖",
             "icon_trend": "趨勢圖", "icon_percent": "百分比", "icon_bolt": "閃電", "icon_flame": "火焰",
             "icon_sparkles": "星光", "icon_terminal": "終端機", "icon_command": "Command", "icon_cpu": "處理器",
-            "icon_chip": "晶片", "icon_timer": "計時器", "icon_refresh_clock": "更新時鐘", "icon_waveform": "狀態波形", "icon_hidden": "隱藏圖示"
+            "icon_chip": "晶片", "icon_timer": "計時器", "icon_refresh_clock": "更新時鐘", "icon_waveform": "狀態波形", "icon_hidden": "隱藏圖示",
+            "alert_normal": "正常", "section_alerts": "警示門檻",
+            "dur_day": "天", "dur_hour": "時", "dur_minute": "分", "dur_join": "",
+            "reset_in": "%@後重置", "retry_after": "%@ 後重試", "section_models": "各模型每週",
+            "pace_help": "進度條上的細線是依時間平均消耗應到的位置；越過它表示消耗偏快。",
+            "tab_services": "服務", "tab_display": "顯示", "tab_menu_bar": "選單列",
+            "tab_touch_bar": "Touch Bar", "tab_general": "一般",
+            "battery_note": "使用電池時 Claude 的更新間隔加倍；螢幕睡眠時暫停更新。",
+            "threshold_preview": "預覽", "menu_bar_tint": "低於門檻時為選單列文字著色",
+            "show_pace_marker": "在進度條上顯示速度參考線", "project_page": "專案頁面",
+            "on_battery": "電池供電"
         ],
         .english: [
             "system_default": "System Default", "settings": "Settings", "quit": "Quit",
@@ -153,7 +201,7 @@ enum L10n {
             "reset_count": "%d resets", "refresh": "Refresh", "official_usage": "Official Usage",
             "section_display": "Display", "display_mode": "Percentages show", "display_mode_remaining": "Remaining", "display_mode_used": "Used",
             "used": "%d%% used", "alert_warning": "Orange alert", "alert_critical": "Red alert",
-            "alert_description": "When a window reaches a threshold, its percentage and progress bar change color in the menu and on the Touch Bar.",
+            "alert_description": "As a window falls past each threshold its percentage and bar turn orange, then red — in the menu bar title, the menu and on the Touch Bar.",
             "section_language": "Language", "language": "App language", "section_menu_bar": "Menu Bar", "icon": "Icon",
             "icon_size": "Icon size", "text_size": "Text size", "section_general": "General",
             "section_services": "Services", "service_missing_codex": "Codex CLI not found.",
@@ -180,7 +228,17 @@ enum L10n {
             "icon_gauge": "Gauge", "icon_simple_gauge": "Simple Gauge", "icon_speedometer": "Speedometer", "icon_bar_chart": "Bar Chart",
             "icon_trend": "Trend", "icon_percent": "Percentage", "icon_bolt": "Bolt", "icon_flame": "Flame",
             "icon_sparkles": "Sparkles", "icon_terminal": "Terminal", "icon_command": "Command", "icon_cpu": "Processor",
-            "icon_chip": "Chip", "icon_timer": "Timer", "icon_refresh_clock": "Refresh Clock", "icon_waveform": "Status Waveform", "icon_hidden": "Hide Icon"
+            "icon_chip": "Chip", "icon_timer": "Timer", "icon_refresh_clock": "Refresh Clock", "icon_waveform": "Status Waveform", "icon_hidden": "Hide Icon",
+            "alert_normal": "Normal", "section_alerts": "Alert thresholds",
+            "dur_day": "d", "dur_hour": "h", "dur_minute": "m", "dur_join": " ",
+            "reset_in": "Resets in %@", "retry_after": "Retries in %@", "section_models": "Weekly by model",
+            "pace_help": "The hairline on each bar marks where an even burn would be by now; past it means you are spending faster than the window refills.",
+            "tab_services": "Services", "tab_display": "Display", "tab_menu_bar": "Menu Bar",
+            "tab_touch_bar": "Touch Bar", "tab_general": "General",
+            "battery_note": "On battery, Claude's refresh interval doubles; refreshing pauses while the display sleeps.",
+            "threshold_preview": "Preview", "menu_bar_tint": "Tint the menu bar text below a threshold",
+            "show_pace_marker": "Show the pace mark on progress bars", "project_page": "Project page",
+            "on_battery": "On battery"
         ],
         .japanese: [
             "system_default": "システム設定に従う", "settings": "設定", "quit": "終了",
@@ -190,7 +248,7 @@ enum L10n {
             "reset_count": "%d 回リセット", "refresh": "更新", "official_usage": "公式 Usage",
             "section_display": "表示", "display_mode": "パーセント表示", "display_mode_remaining": "残量", "display_mode_used": "使用量",
             "used": "使用済み %d%%", "alert_warning": "オレンジ警告", "alert_critical": "赤警告",
-            "alert_description": "しきい値に達すると、メニューと Touch Bar のパーセントと進捗バーの色が変わります。",
+            "alert_description": "しきい値を下回るごとに、メニューバー・メニュー・Touch Bar のパーセントとバーがオレンジ・赤に変わります。",
             "section_language": "言語", "language": "アプリの言語", "section_menu_bar": "メニューバー", "icon": "アイコン",
             "icon_size": "アイコンサイズ", "text_size": "文字サイズ", "section_general": "一般",
             "section_services": "サービス", "service_missing_codex": "Codex CLI が見つかりません。",
@@ -217,7 +275,17 @@ enum L10n {
             "icon_gauge": "ゲージ", "icon_simple_gauge": "シンプルゲージ", "icon_speedometer": "速度計", "icon_bar_chart": "棒グラフ",
             "icon_trend": "トレンド", "icon_percent": "パーセント", "icon_bolt": "稲妻", "icon_flame": "炎",
             "icon_sparkles": "きらめき", "icon_terminal": "ターミナル", "icon_command": "Command", "icon_cpu": "プロセッサ",
-            "icon_chip": "チップ", "icon_timer": "タイマー", "icon_refresh_clock": "更新時計", "icon_waveform": "ステータス波形", "icon_hidden": "アイコンを非表示"
+            "icon_chip": "チップ", "icon_timer": "タイマー", "icon_refresh_clock": "更新時計", "icon_waveform": "ステータス波形", "icon_hidden": "アイコンを非表示",
+            "alert_normal": "正常", "section_alerts": "警告しきい値",
+            "dur_day": "日", "dur_hour": "時間", "dur_minute": "分", "dur_join": "",
+            "reset_in": "%@後にリセット", "retry_after": "%@後に再試行", "section_models": "モデル別の週間",
+            "pace_help": "バー上の細い線は、均等に消費した場合の現在位置です。越えていれば消費が速いことを示します。",
+            "tab_services": "サービス", "tab_display": "表示", "tab_menu_bar": "メニューバー",
+            "tab_touch_bar": "Touch Bar", "tab_general": "一般",
+            "battery_note": "バッテリー駆動時は Claude の更新間隔が2倍になり、ディスプレイのスリープ中は更新を停止します。",
+            "threshold_preview": "プレビュー", "menu_bar_tint": "しきい値を下回るとメニューバーの文字に色を付ける",
+            "show_pace_marker": "進捗バーにペースの目安線を表示", "project_page": "プロジェクトページ",
+            "on_battery": "バッテリー駆動"
         ],
         .korean: [
             "system_default": "시스템 설정 따르기", "settings": "설정", "quit": "종료",
@@ -227,7 +295,7 @@ enum L10n {
             "reset_count": "%d회 재설정", "refresh": "새로 고침", "official_usage": "공식 Usage",
             "section_display": "표시", "display_mode": "퍼센트 표시", "display_mode_remaining": "남은 양", "display_mode_used": "사용량",
             "used": "%d%% 사용", "alert_warning": "주황색 경고", "alert_critical": "빨간색 경고",
-            "alert_description": "임계값에 도달하면 메뉴와 Touch Bar의 퍼센트와 진행 막대 색이 바뀝니다.",
+            "alert_description": "임계값을 지날 때마다 메뉴 막대, 메뉴, Touch Bar의 퍼센트와 막대가 주황, 빨강으로 바뀝니다.",
             "section_language": "언어", "language": "앱 언어", "section_menu_bar": "메뉴 막대", "icon": "아이콘",
             "icon_size": "아이콘 크기", "text_size": "텍스트 크기", "section_general": "일반",
             "section_services": "서비스", "service_missing_codex": "Codex CLI를 찾을 수 없습니다.",
@@ -254,7 +322,17 @@ enum L10n {
             "icon_gauge": "게이지", "icon_simple_gauge": "간단한 게이지", "icon_speedometer": "속도계", "icon_bar_chart": "막대 차트",
             "icon_trend": "추세", "icon_percent": "백분율", "icon_bolt": "번개", "icon_flame": "불꽃",
             "icon_sparkles": "반짝임", "icon_terminal": "터미널", "icon_command": "Command", "icon_cpu": "프로세서",
-            "icon_chip": "칩", "icon_timer": "타이머", "icon_refresh_clock": "새로 고침 시계", "icon_waveform": "상태 파형", "icon_hidden": "아이콘 숨기기"
+            "icon_chip": "칩", "icon_timer": "타이머", "icon_refresh_clock": "새로 고침 시계", "icon_waveform": "상태 파형", "icon_hidden": "아이콘 숨기기",
+            "alert_normal": "정상", "section_alerts": "경고 임계값",
+            "dur_day": "일", "dur_hour": "시", "dur_minute": "분", "dur_join": " ",
+            "reset_in": "%@ 후 재설정", "retry_after": "%@ 후 재시도", "section_models": "모델별 주간",
+            "pace_help": "막대 위의 가는 선은 균등하게 사용했을 때의 현재 위치입니다. 이를 넘으면 소비가 빠르다는 뜻입니다.",
+            "tab_services": "서비스", "tab_display": "표시", "tab_menu_bar": "메뉴 막대",
+            "tab_touch_bar": "Touch Bar", "tab_general": "일반",
+            "battery_note": "배터리 사용 시 Claude 새로 고침 간격이 두 배가 되고, 디스플레이가 잠자면 새로 고침을 멈춥니다.",
+            "threshold_preview": "미리보기", "menu_bar_tint": "임계값 아래에서 메뉴 막대 글자에 색 입히기",
+            "show_pace_marker": "진행 막대에 페이스 표시선 보기", "project_page": "프로젝트 페이지",
+            "on_battery": "배터리 사용 중"
         ],
         .spanish: [
             "system_default": "Según el sistema", "settings": "Ajustes", "quit": "Salir",
@@ -264,7 +342,7 @@ enum L10n {
             "reset_count": "%d restablecimientos", "refresh": "Actualizar", "official_usage": "Usage oficial",
             "section_display": "Visualización", "display_mode": "Los porcentajes muestran", "display_mode_remaining": "Restante", "display_mode_used": "Usado",
             "used": "%d%% usado", "alert_warning": "Alerta naranja", "alert_critical": "Alerta roja",
-            "alert_description": "Al alcanzar un umbral, el porcentaje y la barra de progreso cambian de color en el menú y en la Touch Bar.",
+            "alert_description": "Al cruzar cada umbral, el porcentaje y la barra pasan a naranja y luego a rojo, en la barra de menús, el menú y la Touch Bar.",
             "section_language": "Idioma", "language": "Idioma de la app", "section_menu_bar": "Barra de menús", "icon": "Icono",
             "icon_size": "Tamaño del icono", "text_size": "Tamaño del texto", "section_general": "General",
             "section_services": "Servicios", "service_missing_codex": "No se encontró Codex CLI.",
@@ -291,7 +369,17 @@ enum L10n {
             "icon_gauge": "Indicador", "icon_simple_gauge": "Indicador simple", "icon_speedometer": "Velocímetro", "icon_bar_chart": "Gráfico de barras",
             "icon_trend": "Tendencia", "icon_percent": "Porcentaje", "icon_bolt": "Rayo", "icon_flame": "Llama",
             "icon_sparkles": "Destellos", "icon_terminal": "Terminal", "icon_command": "Command", "icon_cpu": "Procesador",
-            "icon_chip": "Chip", "icon_timer": "Temporizador", "icon_refresh_clock": "Reloj de actualización", "icon_waveform": "Onda de estado", "icon_hidden": "Ocultar icono"
+            "icon_chip": "Chip", "icon_timer": "Temporizador", "icon_refresh_clock": "Reloj de actualización", "icon_waveform": "Onda de estado", "icon_hidden": "Ocultar icono",
+            "alert_normal": "Normal", "section_alerts": "Umbrales de alerta",
+            "dur_day": "d", "dur_hour": "h", "dur_minute": "min", "dur_join": " ",
+            "reset_in": "Se restablece en %@", "retry_after": "Reintento en %@", "section_models": "Semanal por modelo",
+            "pace_help": "La línea fina de cada barra marca dónde estaría un consumo uniforme; pasarla significa gastar más rápido de lo que se repone.",
+            "tab_services": "Servicios", "tab_display": "Visualización", "tab_menu_bar": "Barra de menús",
+            "tab_touch_bar": "Touch Bar", "tab_general": "General",
+            "battery_note": "Con batería, el intervalo de Claude se duplica; la actualización se detiene mientras la pantalla duerme.",
+            "threshold_preview": "Vista previa", "menu_bar_tint": "Colorear el texto de la barra de menús bajo un umbral",
+            "show_pace_marker": "Mostrar la marca de ritmo en las barras", "project_page": "Página del proyecto",
+            "on_battery": "Con batería"
         ]
     ]
 }

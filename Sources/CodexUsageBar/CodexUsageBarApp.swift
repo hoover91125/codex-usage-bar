@@ -1,6 +1,11 @@
 import SwiftUI
 
-let usageMenuContentWidth: CGFloat = 330
+let usageMenuContentWidth: CGFloat = 340
+
+/// The settings window is a fixed size because its content is a sidebar plus
+/// a detail pane: panes of different heights in a resizable window would make
+/// the whole thing jump every time the user switched sections.
+let settingsWindowSize = CGSize(width: 660, height: 470)
 
 struct CodexUsageBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -21,6 +26,12 @@ enum CodexUsageBarMain {
         if CommandLine.arguments.contains("--self-test") {
             runSelfTest()
         }
+        #if DEBUG
+        if let index = CommandLine.arguments.firstIndex(of: "--render-preview"),
+           index + 1 < CommandLine.arguments.count {
+            RenderPreview.run(directory: CommandLine.arguments[index + 1])
+        }
+        #endif
         CodexUsageBarApp.main()
     }
 
