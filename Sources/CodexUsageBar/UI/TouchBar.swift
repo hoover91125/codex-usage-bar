@@ -293,14 +293,102 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
 
     // Compact `.both`. The provider name is printed once per item instead of
     // once per window, which is what pays for the reset item: two grouped
-    // items (180pt each) plus the reset item (185pt) and their spacers come to
-    // ~560pt, inside the ~685pt budget — where four separate items (480pt)
-    // plus a reset item did not fit.
+    // items plus the reset item and their spacers come to ~590pt, inside the
+    // ~685pt budget — where four separate items (480pt) plus a reset item did
+    // not fit.
+    //
+    // Unlike `.both` above, the text-bearing widths here are measured at
+    // startup rather than hand-picked. The localized `five_hour_short` beside
+    // a 3-digit percent ("5 horas 100%", "5 小時 100%") had outgrown the
+    // original 58pt column in every language, and a replacement constant
+    // would be just as stale after the next translation edit. `widestLabel`
+    // sizes the column and the reset item against the widest string any
+    // supported language can produce, using a real label so the cell's own
+    // padding is counted: NSTextField truncates once its width drops below
+    // `intrinsicContentSize`, which for a centered label is ~4pt more than
+    // the bare string — the gap that made a hand-measured 62pt column still
+    // clip Spanish's "Sem 100%" (63pt). Today's worst cases are Spanish, for
+    // a 67pt column, 198pt items and a 192pt reset item.
     private static let compactNameWidth: CGFloat = 44
-    private static let compactColumnWidth: CGFloat = 58
     private static let compactProgressWidth: CGFloat = 54
-    private static let compactItemWidth: CGFloat = 180
-    private static let compactResetWidth: CGFloat = 185
+    private static let compactSpacing: CGFloat = 6
+    private static let compactInset: CGFloat = 4
+    private static let compactNameFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+    private static let compactColumnFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    private static let compactResetFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+    // +4 on each measured width is headroom, so a fraction of a point of
+    // font-metric drift between macOS releases can't reintroduce the clip.
+    private static let compactColumnWidth: CGFloat =
+        ceil(widestLabel(compactColumnTexts, font: compactColumnFont, alignment: .center)) + 4
+    private static let compactItemWidth: CGFloat =
+        compactInset * 2 + compactNameWidth + compactSpacing * 2 + compactColumnWidth * 2
+    private static let compactResetWidth: CGFloat =
+        ceil(widestLabel(compactResetTexts, font: compactResetFont, alignment: .left)) + 4 + compactInset * 2
+
+    /// The width below which a label with this font and alignment starts
+    /// truncating the widest of `strings` — `intrinsicContentSize` of the
+    /// same kind of label the items use, so the cell's padding is included.
+    private static func widestLabel(
+        _ strings: [String],
+        font: NSFont,
+        alignment: NSTextAlignment
+    ) -> CGFloat {
+        let label = NSTextField(labelWithString: "")
+        label.font = font
+        label.alignment = alignment
+        return strings.reduce(0) { widest, string in
+            label.stringValue = string
+            return max(widest, label.intrinsicContentSize.width)
+        }
+    }
+
+    /// Everything a compact column label can show, across all languages: a
+    /// window prefix beside a 3-digit percent, the way `updateUsage` formats
+    /// it (its "–" placeholder is narrower). "5h" is language-neutral, so
+    /// only the weekly prefix varies.
+    private static var compactColumnTexts: [String] {
+        ["5h 100%"] + AppLanguage.allCases.map { language in
+            "\(L10n.string("weekly_prefix", language: language)) 100%"
+        }
+    }
+
+    /// Everything a compact reset row can show, across all languages and
+    /// providers, at a worst-case date: two-digit month, day, hour and
+    /// minute (digits are monospaced, so which ones doesn't matter). Built
+    /// through `compactResetRow` so this can't drift from what is displayed.
+    private static var compactResetTexts: [String] {
+        let date = Calendar(identifier: .gregorian).date(
+            from: DateComponents(year: 2000, month: 12, day: 31, hour: 23, minute: 59)
+        ) ?? Date()
+        var texts: [String] = []
+        for language in AppLanguage.allCases {
+            let weeklyPrefix = L10n.string("weekly_prefix", language: language)
+            let fiveHour = L10n.formatDate(date, language: language, includeDate: false)
+            let weekly = L10n.formatDate(date, language: language, includeDate: true)
+            for provider in UsageProvider.allCases {
+                texts.append(compactResetRow(
+                    provider: provider, fiveHour: fiveHour, weeklyPrefix: weeklyPrefix, weekly: weekly
+                ))
+                for key in ["loading_usage", "usage_unavailable"] {
+                    texts.append("\(provider.displayName) \(L10n.string(key, language: language))")
+                }
+            }
+        }
+        return texts
+    }
+
+    /// One compact reset row: "Claude 5h 18:30 · Wk 9/13, 18:30". "5h" as in
+    /// `touch_bar_reset` rather than the localized `five_hour_short`, which
+    /// pushed the row past any width that leaves room for the two items
+    /// beside it.
+    private static func compactResetRow(
+        provider: UsageProvider,
+        fiveHour: String,
+        weeklyPrefix: String,
+        weekly: String
+    ) -> String {
+        "\(provider.displayName) 5h \(fiveHour) · \(weeklyPrefix) \(weekly)"
+    }
 
     // The `.both` reset item gets what's left of the budget once the four
     // usage items have taken theirs — narrower than `.automatic`'s, hence its
@@ -345,6 +433,17 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateItems() }
             .store(in: &subscriptions)
+
+        // Which number each item prints and when it changes color — neither
+        // touches the snapshots, so they need their own trigger.
+        Publishers.CombineLatest3(
+            store.$usageDisplayMode,
+            store.$warningRemainingPercent,
+            store.$criticalRemainingPercent
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _, _, _ in self?.updateItems() }
+        .store(in: &subscriptions)
 
         // `effectiveTouchBarSource`'s fallback (mirroring `menuTitle`'s) reads
         // `enabledProviders`, which is derived from these three — so they
@@ -639,19 +738,23 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
         let item = NSCustomTouchBarItem(identifier: identifier)
 
         let name = NSTextField(labelWithString: provider.displayName)
-        name.font = .systemFont(ofSize: 11, weight: .semibold)
+        name.font = Self.compactNameFont
         name.alignment = .left
         name.lineBreakMode = .byTruncatingTail
         name.widthAnchor.constraint(equalToConstant: Self.compactNameWidth).isActive = true
 
-        let fiveHour = makeCompactColumn(initialTitle: store.tr("five_hour_short"))
-        let weekly = makeCompactColumn(initialTitle: store.tr("weekly_short"))
+        // Same prefixes `updateCompactContent` uses, so the placeholder is
+        // already the right width.
+        let fiveHour = makeCompactColumn(initialTitle: "5h")
+        let weekly = makeCompactColumn(initialTitle: store.tr("weekly_prefix"))
 
         let stack = NSStackView(views: [name, fiveHour.stack, weekly.stack])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        stack.spacing = Self.compactSpacing
+        stack.edgeInsets = NSEdgeInsets(
+            top: 2, left: Self.compactInset, bottom: 2, right: Self.compactInset
+        )
         stack.widthAnchor.constraint(equalToConstant: Self.compactItemWidth).isActive = true
 
         item.view = stack
@@ -669,9 +772,12 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
         initialTitle: String
     ) -> (stack: NSStackView, label: NSTextField, progress: TouchBarProgressView) {
         let label = NSTextField(labelWithString: "\(initialTitle) –")
-        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        label.font = Self.compactColumnFont
         label.alignment = .center
-        label.lineBreakMode = .byClipping
+        // `compactColumnWidth` is measured so this never triggers; if a
+        // string it wasn't measured against does outgrow it, an ellipsis is
+        // at least visible, where `.byClipping` cut the percent mid-glyph.
+        label.lineBreakMode = .byTruncatingTail
 
         let progress = TouchBarProgressView()
         progress.widthAnchor.constraint(equalToConstant: Self.compactProgressWidth).isActive = true
@@ -694,7 +800,7 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
         compactResetRows.removeAll()
         for provider in UsageProvider.allCases {
             let label = NSTextField(labelWithString: store.tr("loading_reset"))
-            label.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            label.font = Self.compactResetFont
             label.textColor = .secondaryLabelColor
             label.alignment = .left
             label.lineBreakMode = .byTruncatingTail
@@ -706,7 +812,9 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 1
-        stack.edgeInsets = NSEdgeInsets(top: 1, left: 4, bottom: 1, right: 4)
+        stack.edgeInsets = NSEdgeInsets(
+            top: 1, left: Self.compactInset, bottom: 1, right: Self.compactInset
+        )
         stack.widthAnchor.constraint(equalToConstant: Self.compactResetWidth).isActive = true
 
         item.view = stack
@@ -902,10 +1010,13 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
             let snapshot = store.snapshot(for: provider)
             guard let views = compactViews[provider] else { continue }
             // No provider prefix here — the item's own name label carries it,
-            // which is exactly the width `.both` spends four times over.
+            // which is exactly the width `.both` spends four times over. "5h"
+            // rather than the localized `five_hour_short`, as in `.automatic`
+            // and `.both`: it is the only form that fits beside a 3-digit
+            // percent in every language (see `compactColumnWidth`).
             updateUsage(
                 window: snapshot?.primary,
-                prefix: store.tr("five_hour_short"),
+                prefix: "5h",
                 label: views.fiveHourLabel,
                 progress: views.fiveHourProgress
             )
@@ -930,10 +1041,12 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
                 )
                 continue
             }
-            let fiveHour = resetText(snapshot.primary?.resetsAt, short: true)
-            let weekly = resetText(snapshot.secondary?.resetsAt, short: false)
-            row.stringValue = "\(provider.displayName) \(store.tr("five_hour_short")) \(fiveHour) · "
-                + "\(store.tr("weekly_prefix")) \(weekly)"
+            row.stringValue = Self.compactResetRow(
+                provider: provider,
+                fiveHour: resetText(snapshot.primary?.resetsAt, short: true),
+                weeklyPrefix: store.tr("weekly_prefix"),
+                weekly: resetText(snapshot.secondary?.resetsAt, short: false)
+            )
         }
     }
 
@@ -960,18 +1073,16 @@ final class UsageTouchBarController: NSObject, NSTouchBarDelegate {
             progress?.value = 0
             return
         }
-        let remaining = window.remainingPercent
+        let percent = store.displayPercent(window)
         let color: NSColor
-        if remaining <= 10 {
-            color = .systemRed
-        } else if remaining <= 25 {
-            color = .systemOrange
-        } else {
-            color = .controlAccentColor
+        switch store.alertLevel(for: window) {
+        case .critical: color = .systemRed
+        case .warning: color = .systemOrange
+        case .normal: color = .controlAccentColor
         }
-        label?.stringValue = "\(prefix) \(remaining)%"
+        label?.stringValue = "\(prefix) \(percent)%"
         label?.textColor = color
-        progress?.value = Double(remaining)
+        progress?.value = Double(percent)
         progress?.tintColor = color
     }
 

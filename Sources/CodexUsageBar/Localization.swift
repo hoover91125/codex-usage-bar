@@ -59,6 +59,17 @@ enum L10n {
         String(format: string(key, language: language), locale: language.locale, arguments: arguments)
     }
 
+    /// Locale-aware "H:mm" (or "M/d H:mm" with `includeDate`) in `language`'s
+    /// locale. `UsageStore.formatDate` is the instance-level form; this one
+    /// exists so the Touch Bar can size its items against every language's
+    /// date shape up front, without a store.
+    static func formatDate(_ date: Date, language: AppLanguage, includeDate: Bool) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = language.locale
+        formatter.setLocalizedDateFormatFromTemplate(includeDate ? "MdHm" : "Hm")
+        return formatter.string(from: date)
+    }
+
     private static let tables: [AppLanguage: [String: String]] = [
         .zhHans: [
             "system_default": "跟随系统", "settings": "设置", "quit": "退出",
@@ -66,6 +77,9 @@ enum L10n {
             "remaining": "%d%% 剩余", "unavailable": "不可用", "reset_at": "重置：%@", "updated_at": "更新于 %@",
             "credits_unlimited": "积分无限", "credits_balance": "积分 %@", "credits_unavailable": "无积分信息",
             "reset_count": "%d 次重置", "refresh": "刷新", "official_usage": "官方 Usage",
+            "section_display": "显示", "display_mode": "百分比显示", "display_mode_remaining": "剩余量", "display_mode_used": "使用量",
+            "used": "已使用 %d%%", "alert_warning": "橙色警示", "alert_critical": "红色警示",
+            "alert_description": "达到阈值时，菜单窗口与 Touch Bar 的百分比和进度条会变色。",
             "section_language": "语言", "language": "应用语言", "section_menu_bar": "菜单栏", "icon": "图标",
             "icon_size": "图标大小", "text_size": "文字字号", "section_general": "通用",
             "section_services": "服务", "service_missing_codex": "找不到 Codex CLI。",
@@ -100,6 +114,9 @@ enum L10n {
             "remaining": "剩餘 %d%%", "unavailable": "無法使用", "reset_at": "重置：%@", "updated_at": "更新於 %@",
             "credits_unlimited": "點數無限", "credits_balance": "點數 %@", "credits_unavailable": "無點數資訊",
             "reset_count": "%d 次重置", "refresh": "重新整理", "official_usage": "官方 Usage",
+            "section_display": "顯示", "display_mode": "百分比顯示", "display_mode_remaining": "剩餘量", "display_mode_used": "使用量",
+            "used": "已使用 %d%%", "alert_warning": "橘色警示", "alert_critical": "紅色警示",
+            "alert_description": "達到門檻時，選單視窗與 Touch Bar 的百分比和進度條會變色。",
             "section_language": "語言", "language": "應用程式語言", "section_menu_bar": "選單列", "icon": "圖示",
             "icon_size": "圖示大小", "text_size": "文字大小", "section_general": "一般",
             "section_services": "服務", "service_missing_codex": "找不到 Codex CLI。",
@@ -134,6 +151,9 @@ enum L10n {
             "remaining": "%d%% remaining", "unavailable": "Unavailable", "reset_at": "Resets: %@", "updated_at": "Updated %@",
             "credits_unlimited": "Unlimited credits", "credits_balance": "Credits %@", "credits_unavailable": "No credit information",
             "reset_count": "%d resets", "refresh": "Refresh", "official_usage": "Official Usage",
+            "section_display": "Display", "display_mode": "Percentages show", "display_mode_remaining": "Remaining", "display_mode_used": "Used",
+            "used": "%d%% used", "alert_warning": "Orange alert", "alert_critical": "Red alert",
+            "alert_description": "When a window reaches a threshold, its percentage and progress bar change color in the menu and on the Touch Bar.",
             "section_language": "Language", "language": "App language", "section_menu_bar": "Menu Bar", "icon": "Icon",
             "icon_size": "Icon size", "text_size": "Text size", "section_general": "General",
             "section_services": "Services", "service_missing_codex": "Codex CLI not found.",
@@ -168,6 +188,9 @@ enum L10n {
             "remaining": "残り %d%%", "unavailable": "利用不可", "reset_at": "リセット：%@", "updated_at": "更新：%@",
             "credits_unlimited": "クレジット無制限", "credits_balance": "クレジット %@", "credits_unavailable": "クレジット情報なし",
             "reset_count": "%d 回リセット", "refresh": "更新", "official_usage": "公式 Usage",
+            "section_display": "表示", "display_mode": "パーセント表示", "display_mode_remaining": "残量", "display_mode_used": "使用量",
+            "used": "使用済み %d%%", "alert_warning": "オレンジ警告", "alert_critical": "赤警告",
+            "alert_description": "しきい値に達すると、メニューと Touch Bar のパーセントと進捗バーの色が変わります。",
             "section_language": "言語", "language": "アプリの言語", "section_menu_bar": "メニューバー", "icon": "アイコン",
             "icon_size": "アイコンサイズ", "text_size": "文字サイズ", "section_general": "一般",
             "section_services": "サービス", "service_missing_codex": "Codex CLI が見つかりません。",
@@ -202,6 +225,9 @@ enum L10n {
             "remaining": "%d%% 남음", "unavailable": "사용할 수 없음", "reset_at": "재설정: %@", "updated_at": "업데이트: %@",
             "credits_unlimited": "크레딧 무제한", "credits_balance": "크레딧 %@", "credits_unavailable": "크레딧 정보 없음",
             "reset_count": "%d회 재설정", "refresh": "새로 고침", "official_usage": "공식 Usage",
+            "section_display": "표시", "display_mode": "퍼센트 표시", "display_mode_remaining": "남은 양", "display_mode_used": "사용량",
+            "used": "%d%% 사용", "alert_warning": "주황색 경고", "alert_critical": "빨간색 경고",
+            "alert_description": "임계값에 도달하면 메뉴와 Touch Bar의 퍼센트와 진행 막대 색이 바뀝니다.",
             "section_language": "언어", "language": "앱 언어", "section_menu_bar": "메뉴 막대", "icon": "아이콘",
             "icon_size": "아이콘 크기", "text_size": "텍스트 크기", "section_general": "일반",
             "section_services": "서비스", "service_missing_codex": "Codex CLI를 찾을 수 없습니다.",
@@ -236,6 +262,9 @@ enum L10n {
             "remaining": "%d%% restante", "unavailable": "No disponible", "reset_at": "Se restablece: %@", "updated_at": "Actualizado %@",
             "credits_unlimited": "Créditos ilimitados", "credits_balance": "Créditos %@", "credits_unavailable": "Sin información de créditos",
             "reset_count": "%d restablecimientos", "refresh": "Actualizar", "official_usage": "Usage oficial",
+            "section_display": "Visualización", "display_mode": "Los porcentajes muestran", "display_mode_remaining": "Restante", "display_mode_used": "Usado",
+            "used": "%d%% usado", "alert_warning": "Alerta naranja", "alert_critical": "Alerta roja",
+            "alert_description": "Al alcanzar un umbral, el porcentaje y la barra de progreso cambian de color en el menú y en la Touch Bar.",
             "section_language": "Idioma", "language": "Idioma de la app", "section_menu_bar": "Barra de menús", "icon": "Icono",
             "icon_size": "Tamaño del icono", "text_size": "Tamaño del texto", "section_general": "General",
             "section_services": "Servicios", "service_missing_codex": "No se encontró Codex CLI.",

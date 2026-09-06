@@ -27,7 +27,11 @@ struct RateWindow: Sendable, Codable {
     let durationMinutes: Int?
     let resetsAt: Date?
 
-    var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+    /// `usedPercent` as the servers report it can sit outside 0…100 (Codex
+    /// briefly reports over 100 at the moment a window is exhausted), so
+    /// both derived percentages are clamped and always sum to 100.
+    var usedPercentClamped: Int { max(0, min(100, usedPercent)) }
+    var remainingPercent: Int { 100 - usedPercentClamped }
 }
 
 /// An extra, provider-specific window (e.g. Claude's per-model weekly limits).

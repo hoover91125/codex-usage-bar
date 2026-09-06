@@ -54,6 +54,41 @@ struct SettingsView: View {
                 }
             }
 
+            Section(store.tr("section_display")) {
+                Picker(store.tr("display_mode"), selection: $store.usageDisplayMode) {
+                    Text(store.tr("display_mode_remaining")).tag(UsageDisplayMode.remaining)
+                    Text(store.tr("display_mode_used")).tag(UsageDisplayMode.used)
+                }
+
+                // Thresholds are stored as remaining percent; in `.used` mode
+                // they are shown flipped ("used ≥ 75%") so the slider reads in
+                // the same terms as every number on screen. The store keeps
+                // red at or below orange, so dragging one slider past the
+                // other drags the other along. No `step` here: a stepped
+                // Slider draws a tick per step, and 21 ticks across 0–100 is
+                // clutter — the 5% snapping lives in `thresholdBinding`
+                // instead, and the suffix shows the exact value.
+                settingSlider(
+                    title: store.tr("alert_warning"),
+                    value: thresholdBinding(\.warningRemainingPercent),
+                    range: 0...100,
+                    step: nil,
+                    suffix: thresholdSuffix(store.warningRemainingPercent)
+                )
+
+                settingSlider(
+                    title: store.tr("alert_critical"),
+                    value: thresholdBinding(\.criticalRemainingPercent),
+                    range: 0...100,
+                    step: nil,
+                    suffix: thresholdSuffix(store.criticalRemainingPercent)
+                )
+
+                Text(store.tr("alert_description"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section(store.tr("section_menu_bar")) {
                 Picker(store.tr("icon"), selection: $store.menuIconName) {
                     ForEach(icons, id: \.0) { icon in
@@ -117,7 +152,30 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding(4)
         .environment(\.locale, store.appLanguage.locale)
-        .frame(width: 440, height: 500)
+        .frame(width: 440, height: 640)
+    }
+
+    /// A threshold slider in the terms of the current display mode: the
+    /// stored remaining percent as-is, or its used-percent mirror. Snaps to
+    /// multiples of `thresholdStep` on write, which is what makes the knob
+    /// step even though the Slider itself is continuous (and tick-free).
+    private static let thresholdStep = 5.0
+
+    private func thresholdBinding(_ keyPath: ReferenceWritableKeyPath<UsageStore, Int>) -> Binding<Double> {
+        Binding(
+            get: {
+                let remaining = store[keyPath: keyPath]
+                return Double(store.usageDisplayMode == .used ? 100 - remaining : remaining)
+            },
+            set: { value in
+                let shown = Int((value / Self.thresholdStep).rounded() * Self.thresholdStep)
+                store[keyPath: keyPath] = store.usageDisplayMode == .used ? 100 - shown : shown
+            }
+        )
+    }
+
+    private func thresholdSuffix(_ remaining: Int) -> String {
+        store.usageDisplayMode == .used ? "≥ \(100 - remaining)%" : "≤ \(remaining)%"
     }
 
     // Mirrors `menuTitle`'s fallback: if the stored preference points at a
@@ -149,17 +207,23 @@ struct SettingsView: View {
         }
     }
 
+    /// `step: nil` gives a continuous slider with no tick marks; callers that
+    /// want snapping without ticks do it in their binding.
     @ViewBuilder
     private func settingSlider(
         title: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
-        step: Double = 1,
+        step: Double? = 1,
         suffix: String
     ) -> some View {
         HStack {
             Text(title)
-            Slider(value: value, in: range, step: step)
+            if let step {
+                Slider(value: value, in: range, step: step)
+            } else {
+                Slider(value: value, in: range)
+            }
             Text(suffix)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)

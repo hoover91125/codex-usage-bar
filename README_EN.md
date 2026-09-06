@@ -17,6 +17,7 @@
 - Codex and Claude side by side: Claude usage comes from the Claude Code login on this Mac and includes per-model weekly windows such as Opus and Sonnet.
 - Uses a native macOS menu for progress, reset times, credits, and resets.
 - Configurable menu bar icon, icon size, and text size.
+- Percentages shown as remaining or as used, with configurable orange and red alert thresholds for the menu and Touch Bar.
 - Follows the system language by default, with in-app switching between Simplified Chinese, Traditional Chinese, English, Japanese, Korean, and Spanish.
 - Optional launch at login. Codex refreshes every minute; Claude is requested at most every five minutes.
 - Touch Bar progress, percentages, reset times, and manual refresh, for one provider or both.

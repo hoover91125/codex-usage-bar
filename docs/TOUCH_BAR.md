@@ -16,9 +16,27 @@ to the same text `.automatic` uses.
 default builds one item per provider/window pair — four items, each repeating
 its provider's name, which costs 480pt and leaves no room for reset times. The
 compact layout groups by provider instead: the brand name is printed once per
-item with both windows as columns beside it, so two items (180pt each) and a
-two-row reset item (185pt) fit in ~560pt. Each reset row names its provider and
-sits in the same order as the items to its left.
+item with both windows as columns beside it, so two items and a two-row reset
+item fit in ~590pt. Each reset row names its provider and sits in the same
+order as the items to its left.
+
+Both `.both` layouts print the five-hour window as the language-neutral "5h"
+(the form every translation of `touch_bar_reset` already uses) rather than the
+localized `five_hour_short`: beside a three-digit percent the localized form is
+61–76pt in the compact column's 11pt font, wider than any column that leaves
+room for two per provider.
+
+The compact layout's column and reset widths are measured at launch rather
+than hardcoded (`widestLabel` in `TouchBar.swift`): every string the labels can
+show is generated for every supported language — weekly prefixes, loading and
+unavailable texts, and reset rows at a worst-case two-digit date in each
+locale — and the widest `intrinsicContentSize` of a real label with the same
+font and alignment sets the width, plus a few points of headroom. Measuring the
+label rather than the string matters: a centered `NSTextField` needs ~4pt more
+than its text and truncates below that, which is how a hand-picked width can
+still clip. A new language or a longer translation is therefore picked up
+without re-measuring, at the cost of item width; `.both`'s four-item layout
+keeps its hand-sized constants, whose margins are recorded beside them.
 
 Item widths are sized for the region left of the native Control Strip, not the
 full strip (see `placement` below). There is no refresh button on the bar; the

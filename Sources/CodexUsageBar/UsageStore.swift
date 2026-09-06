@@ -9,6 +9,28 @@ func usageProviderClient(for provider: UsageProvider) -> any UsageProviderClient
     }
 }
 
+/// Whether every percentage the app shows — menu bar title, popover rows,
+/// Touch Bar items — is what is left of a window or what has been used.
+/// Progress bars follow the same choice, so in `.used` they fill up as the
+/// window is consumed. Absent `UserDefaults` key means `.remaining`, which
+/// is the only thing the app showed before this existed.
+enum UsageDisplayMode: String, CaseIterable, Identifiable, Sendable {
+    case remaining
+    case used
+
+    var id: String { rawValue }
+}
+
+/// How far a window's remaining budget has fallen relative to the two
+/// user-set thresholds (`warningRemainingPercent` / `criticalRemainingPercent`).
+/// The views pick the colors; this is the one shared rule, so the popover
+/// and the Touch Bar can't disagree about when to change.
+enum UsageAlertLevel: Sendable {
+    case normal
+    case warning
+    case critical
+}
+
 /// Result of fetching one provider, kept fully Sendable so it can cross the
 /// TaskGroup child-task boundary without carrying an existential `Error`.
 private enum FetchOutcome: Sendable {
@@ -58,6 +80,32 @@ final class UsageStore: ObservableObject {
     }
     @Published var menuBarSource: UsageProvider {
         didSet { UserDefaults.standard.set(menuBarSource.rawValue, forKey: "menuBarSource") }
+    }
+    @Published var usageDisplayMode: UsageDisplayMode {
+        didSet { UserDefaults.standard.set(usageDisplayMode.rawValue, forKey: "usageDisplayMode") }
+    }
+    /// Alert thresholds, always stored as *remaining* percent no matter what
+    /// `usageDisplayMode` shows: a window at or below `warning` remaining is
+    /// orange, at or below `critical` remaining is red. The settings UI
+    /// presents them as "used ≥" in `.used` mode by flipping against 100, so
+    /// switching modes never changes when a window actually turns color.
+    /// Each setter keeps `critical <= warning`; the clamp writes through the
+    /// other property's `didSet`, which then finds nothing left to fix.
+    @Published var warningRemainingPercent: Int {
+        didSet {
+            UserDefaults.standard.set(warningRemainingPercent, forKey: "alertWarningRemainingPercent")
+            if criticalRemainingPercent > warningRemainingPercent {
+                criticalRemainingPercent = warningRemainingPercent
+            }
+        }
+    }
+    @Published var criticalRemainingPercent: Int {
+        didSet {
+            UserDefaults.standard.set(criticalRemainingPercent, forKey: "alertCriticalRemainingPercent")
+            if warningRemainingPercent < criticalRemainingPercent {
+                warningRemainingPercent = criticalRemainingPercent
+            }
+        }
     }
 
     // Populated off the main actor at the start of every refresh cycle.
@@ -137,6 +185,15 @@ final class UsageStore: ObservableObject {
         providerEnabledCodex = defaults.object(forKey: "providerEnabledCodex") as? Bool ?? true
         providerEnabledClaude = defaults.object(forKey: "providerEnabledClaude") as? Bool ?? true
         menuBarSource = defaults.string(forKey: "menuBarSource").flatMap(UsageProvider.init(rawValue:)) ?? .codex
+        usageDisplayMode = defaults.string(forKey: "usageDisplayMode").flatMap(UsageDisplayMode.init(rawValue:)) ?? .remaining
+        // The defaults are the thresholds that were hardcoded before these
+        // were settings. Stored values are clamped and re-ordered on the way
+        // in so a hand-edited plist can't put red above orange.
+        let storedWarning = defaults.object(forKey: "alertWarningRemainingPercent") as? Int ?? 25
+        let storedCritical = defaults.object(forKey: "alertCriticalRemainingPercent") as? Int ?? 10
+        let warning = max(0, min(100, storedWarning))
+        warningRemainingPercent = warning
+        criticalRemainingPercent = max(0, min(warning, storedCritical))
 
         // Before the first `refresh()`, so a relaunch inside a provider's
         // minimum interval shows the cached numbers and skips the request.
@@ -250,9 +307,33 @@ final class UsageStore: ObservableObject {
         guard let provider, let snapshot = snapshot(for: provider) else {
             return isLoading ? "…" : "!"
         }
-        let fiveHour = snapshot.primary.map { "\($0.remainingPercent)%" } ?? "–"
-        let weekly = snapshot.secondary.map { "\($0.remainingPercent)%" } ?? "–"
+        let fiveHour = snapshot.primary.map { "\(displayPercent($0))%" } ?? "–"
+        let weekly = snapshot.secondary.map { "\(displayPercent($0))%" } ?? "–"
         return "\(fiveHour)·\(weekly)"
+    }
+
+    /// The one number every surface prints for `window`, per
+    /// `usageDisplayMode`. Progress bars use it too, so a bar and its label
+    /// always agree.
+    func displayPercent(_ window: RateWindow) -> Int {
+        switch usageDisplayMode {
+        case .remaining: return window.remainingPercent
+        case .used: return window.usedPercentClamped
+        }
+    }
+
+    /// The localized "%d%% remaining" / "%d%% used" line for `window`.
+    func displayPercentText(_ window: RateWindow) -> String {
+        tr(usageDisplayMode == .used ? "used" : "remaining", displayPercent(window))
+    }
+
+    /// Thresholds compare against what is *left*, whichever way the number
+    /// is displayed — see `warningRemainingPercent`.
+    func alertLevel(for window: RateWindow) -> UsageAlertLevel {
+        let remaining = window.remainingPercent
+        if remaining <= criticalRemainingPercent { return .critical }
+        if remaining <= warningRemainingPercent { return .warning }
+        return .normal
     }
 
     func tr(_ key: String) -> String {
@@ -264,10 +345,7 @@ final class UsageStore: ObservableObject {
     }
 
     func formatDate(_ date: Date, includeDate: Bool = true) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = appLanguage.locale
-        formatter.setLocalizedDateFormatFromTemplate(includeDate ? "MdHm" : "Hm")
-        return formatter.string(from: date)
+        L10n.formatDate(date, language: appLanguage, includeDate: includeDate)
     }
 
     /// Refreshes if the oldest enabled provider's snapshot is older than

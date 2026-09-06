@@ -66,9 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         .store(in: &subscriptions)
 
-        Publishers.CombineLatest3(store.$menuIconName, store.$menuIconSize, store.$menuTextSize)
+        // `usageDisplayMode` is here rather than with the fetch state above
+        // because it changes the title's numbers without any snapshot moving.
+        Publishers.CombineLatest4(store.$menuIconName, store.$menuIconSize, store.$menuTextSize, store.$usageDisplayMode)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _, _ in self?.updateStatusItem() }
+            .sink { [weak self] _, _, _, _ in self?.updateStatusItem() }
             .store(in: &subscriptions)
 
         store.$appLanguage
@@ -146,11 +148,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let textFont = NSFont.monospacedDigitSystemFont(ofSize: pointSize, weight: .medium)
         let baselineOffset = -max(0.5, round(pointSize * 0.08 * 2) / 2)
         button.font = textFont
+        // No explicit foreground color: the status bar button's cell fills
+        // in the color for its state, which is what dims the title along
+        // with the template icon on a display the menu bar is inactive on.
+        // An explicit `labelColor` here kept the text at full brightness
+        // there while every neighbouring item faded.
         button.attributedTitle = NSAttributedString(
             string: store.menuTitle,
             attributes: [
                 .font: textFont,
-                .foregroundColor: NSColor.labelColor,
                 .baselineOffset: baselineOffset
             ]
         )
@@ -221,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func presentSettingsWindow() {
         if settingsWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 500),
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: 640),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false

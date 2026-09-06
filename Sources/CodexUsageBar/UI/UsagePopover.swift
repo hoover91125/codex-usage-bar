@@ -7,10 +7,12 @@ struct UsageWindowRow: View {
     let window: RateWindow?
 
     private var color: Color {
-        guard let remaining = window?.remainingPercent else { return .secondary }
-        if remaining <= 10 { return .red }
-        if remaining <= 25 { return .orange }
-        return .accentColor
+        guard let window else { return .secondary }
+        switch store.alertLevel(for: window) {
+        case .critical: return .red
+        case .warning: return .orange
+        case .normal: return .accentColor
+        }
     }
 
     var body: some View {
@@ -19,12 +21,12 @@ struct UsageWindowRow: View {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text(window.map { store.tr("remaining", $0.remainingPercent) } ?? store.tr("unavailable"))
+                Text(window.map { store.displayPercentText($0) } ?? store.tr("unavailable"))
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(color)
             }
 
-            ProgressView(value: Double(window?.remainingPercent ?? 0), total: 100)
+            ProgressView(value: Double(window.map { store.displayPercent($0) } ?? 0), total: 100)
                 .tint(color)
 
             if let reset = window?.resetsAt {
